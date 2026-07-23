@@ -1,6 +1,24 @@
 # TDTC-AI-SIM
 전통시장 AI 안전탐지 관제 솔루션 — 디지털 트윈 시뮬레이션 엔진 (FastAPI + Mesa)
 
+## 변경 이력
+
+### 2026-07-23
+- **파이프라인 B(`/simulate/scenario`) 응답 계약을 BE `ScenarioResultDto`에 맞춰 정식 구현**
+  - 기존에는 `{scenarioType, steps, finalSnapshot, note}` 형태의 임시 dict를 반환했으나,
+    `scenarioId`(UUID), `requestedAt`, 스텝별 전체 에이전트 상태 `frames`,
+    `evacuationTimeSeconds`, `finalRiskScore`를 포함하는 `ScenarioResult` 스키마로 교체
+  - `evacuationTimeSeconds`: `VisitorState.EVACUATING` 상태 에이전트 전원이 출구 구역(`is_exit_zone`)에
+    도달한 시점을 기준으로 산출. `STEP_DURATION_SECONDS`(현재 10초로 가정)는 임시 캘리브레이션 값이며,
+    구역 간 실제 거리(`mrkadjc01m.distance_m`)와 평균 보행속도 기반 재산정이 후속 과제로 남아있음
+  - `finalRiskScore`: 마지막 스텝에서 위험도가 가장 높은 구역의 점수/등급/세부지표를 시장 전체 대표값으로 사용
+  - BE와의 실제 통합 테스트 완료 (BE가 이 응답을 정상적으로 역직렬화하는 것까지 확인)
+- **음향 센서 데이터 사용 중단**
+  - `repo.fetch_acoustic_events()` 함수 자체는 남겨두되, `/simulate/snapshot`(`simulate.py`)에서의 실제 호출을 비활성화(주석 처리)하고 `acoustics = {}`로 대체
+  - `risk.py`의 가중치 재정규화 로직에 의해 `acoustic_event_count=0`이면 위험도 종합 계산에서 음향 지표가 자동으로 제외됨 (별도 로직 변경 불필요)
+  - `sensor-seed.sql`의 "5) 음향 이벤트" 섹션(18건) 삭제, `scripts/generate_sensor_seed.py`의 해당 INSERT 생성(`emit`) 호출 비활성화
+  - ⚠️ `sensor-seed.sql`, `scripts/generate_sensor_seed.py`는 이 저장소에 커밋된 적이 없던 파일이라(로컬 전용), 이번 변경분도 별도로 전달받아 적용 필요
+
 ## 아키텍처 상 위치
 
 ```text
@@ -19,7 +37,7 @@
 | 구분 | 엔드포인트 | 모드 | 설명 |
 |---|---|---|---|
 | A. 관제/분석 | `POST /simulate/snapshot` | MIRROR | 센서 실측값을 로드해 오브젝트 배치 + 위험도 산출 |
-| B. 시나리오 | `POST /simulate/scenario` | SCENARIO | 사용자 지정 What-if 실험 (이벤트 모델 미구현) |
+| B. 시나리오 | `POST /simulate/scenario` | SCENARIO | 사용자 지정 What-if 실험. 응답 계약(frames/evacuationTimeSeconds/finalRiskScore) 구현 완료, 화재/음향전파 등 이벤트 모델 자체는 미구현 |
 
 ## 폴더 구조
 
@@ -89,7 +107,7 @@ API 문서: http://localhost:8000/docs
 ## 알려진 한계 / 후속 작업
 
 - **개별 보행자 좌표는 근사값**이다. CCTV/LiDAR는 구역 단위 집계(`visitor_count`)만 제공하므로 실제 개인 위치는 복원 불가하며, 폴리곤 내부에 통계적 분포로 배치한다.
-- **음향 이벤트는 위험 점수에만 반영**된다. 비명 감지는 밀집도와 무관한 별개의 사건이므로, 밀집 위험 점수에 섞기보다 독립적인 알림 체계로 분리하는 것이 적절하다. (후속 과제)
+- **음향 이벤트는 2026-07-23부로 사용 중단**되었다. 관련 DB 테이블(`audevnt01m/h`)이 제거되었고, 위험도 산출에서도 음향 지표는 항상 0으로 처리되어 자동으로 제외된다. (참고로 중단 전에는 비명 감지 등 밀집도와 무관한 사건을 밀집 위험 점수에 섞기보다 독립 알림 체계로 분리하는 것이 적절하다는 논의가 있었다.)
 - **파이프라인 B의 이벤트 모델 미구현**: 화재 확산, 음향 전파, 통로 폐쇄 영향 시뮬레이션.
 - **캘리브레이션 필요**: 현재 임계값은 일반 인파 기준이며, 실제 시장 특성(점포 배치, 상시 체류 인원 등)에 맞춘 보정이 필요하다.
 
