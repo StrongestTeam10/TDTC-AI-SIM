@@ -1,12 +1,12 @@
 """
 센서 시드 데이터 생성기.
 
-실제 CCTV/LiDAR/레이더/음향 장비가 없는 개발 단계에서
+실제 CCTV/LiDAR 장비가 없는 개발 단계에서
 파이프라인 A를 끝까지 검증하기 위한 가상 실측 데이터를 만든다.
+(레이더/음향 센서는 2026-07-23부로 완전히 제거되어 더 이상 생성하지 않는다)
 
 물리적 정합성을 유지한다:
   - 라이다 감지 인원수는 CCTV 집계 인원수와 근사해야 한다 (센서 간 교차 검증)
-  - 밀집도가 높아질수록 보행 속도(레이더)는 떨어진다
   - 라이다 포인트 수는 감지 인원수에 비례한다
 
 사용법:
@@ -41,10 +41,7 @@ WEEKDAY_MULTIPLIER = {0: 0.85, 1: 0.82, 2: 0.88, 3: 0.90, 4: 1.05, 5: 1.45, 6: 1
 ZONE_PEAK_CAPACITY = {1: 260, 2: 340, 3: 330}
 
 # 센서 유형 코드 (comcode01m 기준, 5자 고정: SEN + 2자 약어)
-SENSOR_TYPES = {"SENLD": "라이다", "SENRD": "레이더", "SENAU": "음향"}
-
-# 음향 이벤트 종류와 발생 확률 (타임스텝당)
-ACOUSTIC_EVENTS = [("비명", 0.0008), ("충돌", 0.0015), ("고성", 0.0035)]
+SENSOR_TYPES = {"SENLD": "라이다"}
 
 INTERVAL_MINUTES = 10
 DAYS = 4
@@ -83,17 +80,6 @@ def status_level_code(density: float) -> str:
     return "LVL01"  # LOW
 
 
-def walking_speed(density: float) -> int:
-    """
-    밀집도에 따른 평균 보행 속도(cm/s).
-    자유 보행 130cm/s에서 시작해 밀집이 심해질수록 30cm/s까지 감소한다.
-    """
-    if density <= 0.3:
-        return random.randint(120, 140)
-    speed = 130.0 - (density / 5.0) * 100.0
-    return max(25, int(speed + random.uniform(-8, 8)))
-
-
 def generate() -> str:
     rng = random.Random(20260720)
     random.seed(20260720)
@@ -106,8 +92,8 @@ def generate() -> str:
     lines.append("-- =========================================")
     lines.append("")
 
-    # 1) 센서 등록: 구역별로 라이다/레이더/음향 각 1대
-    lines.append("-- 1) 센서 9대 (구역당 라이다/레이더/음향 각 1대)")
+    # 1) 센서 등록: 구역별로 라이다 1대
+    lines.append("-- 1) 센서 3대 (구역당 라이다 1대 - 레이더/음향은 완전 제거됨)")
     lines.append("INSERT INTO sensens01m (zone_id, sensor_type_code, ip_address) VALUES")
     rows = []
     sensor_id = 0
@@ -123,8 +109,6 @@ def generate() -> str:
     # 2) 시계열 관측 데이터 생성
     crowd_rows: list[str] = []
     lidar_rows: list[str] = []
-    radar_rows: list[str] = []
-    acoustic_rows: list[str] = []
 
     steps_per_day = 24 * 60 // INTERVAL_MINUTES
     for day in range(DAYS):
@@ -173,24 +157,6 @@ def generate() -> str:
                     f"{int(density * 100)})"
                 )
 
-                # 레이더: 감지 인원수 + 평균 이동 속도
-                rad_cnt = max(0, int(count * rng.uniform(0.90, 1.10)))
-                radar_rows.append(
-                    f"    ({sensor_map[(zid, 'SENRD')]}, {rng.randint(40, 95)}, '{ts_sql}', "
-                    f"{rad_cnt}, {walking_speed(density)}, '{status_level_code(density)}')"
-                )
-
-                # 음향 이벤트: 사람이 있을 때만, 밀집도가 높을수록 발생 확률 증가
-                if count > 20:
-                    for sound_type, base_prob in ACOUSTIC_EVENTS:
-                        prob = base_prob * (1.0 + density * 2.0)
-                        if rng.random() < prob:
-                            conf = round(rng.uniform(0.62, 0.97), 2)
-                            acoustic_rows.append(
-                                f"    ({sensor_map[(zid, 'SENAU')]}, '{sound_type}', "
-                                f"{conf}, FALSE, '{ts_sql}')"
-                            )
-
     def emit(title: str, table: str, cols: str, rows: list[str], chunk: int = 500) -> None:
         lines.append(f"-- {title} ({len(rows)}건)")
         for i in range(0, len(rows), chunk):
@@ -204,12 +170,6 @@ def generate() -> str:
     emit("3) 라이다 센서 데이터", "senlidr01m",
          "sensor_id, pt_cloud_cnt, updated_at, detect_cnt, avg_dist_m, status_level_code, density_score",
          lidar_rows)
-    emit("4) 레이더 센서 데이터", "senradr01m",
-         "sensor_id, refl_intens, updated_at, detect_cnt, avg_speed, status_level_code", radar_rows)
-    # 음향 센서 데이터 사용 중단 결정 (audevnt01m/h 테이블 DB에서 제거됨).
-    # acoustic_rows 생성 로직은 남겨두되, INSERT문 생성(emit)은 비활성화한다.
-    # emit("5) 음향 이벤트", "audevnt01m",
-    #      "sensor_id, sound_type, confidence, is_checked, detected_at", acoustic_rows)
 
     return "\n".join(lines) + "\n"
 

@@ -56,81 +56,52 @@ def fetch_gates(market_id: int) -> list[dict]:
 def fetch_crowd_density(market_id: int, captured_at: datetime | None = None) -> list[dict]:
     """
     구역별 인구 밀집도 관측값.
+
+    CRDDNST01M에는 market_id가 없으므로 MRKADDR01D(구역)를 조인해 시장 단위로 필터링한다.
     captured_at이 없으면 각 구역의 최신 1건을 가져온다.
     """
     with get_cursor() as cur:
         if captured_at is not None:
             cur.execute(
-                "SELECT zone_id, visitor_count, density_score, status_level, captured_at "
-                "FROM crddnst01m WHERE market_id = %s AND captured_at = %s",
+                """
+                SELECT c.zone_id, c.visitor_count, c.density_score,
+                       c.status_level, c.captured_at
+                FROM crddnst01m c
+                JOIN mrkaddr01d z ON z.zone_id = c.zone_id
+                WHERE z.market_id = %s AND c.captured_at = %s
+                """,
                 (market_id, captured_at),
             )
         else:
             cur.execute(
                 """
-                SELECT DISTINCT ON (zone_id)
-                       zone_id, visitor_count, density_score, status_level, captured_at
-                FROM crddnst01m
-                WHERE market_id = %s
-                ORDER BY zone_id, captured_at DESC
+                SELECT DISTINCT ON (c.zone_id)
+                       c.zone_id, c.visitor_count, c.density_score,
+                       c.status_level, c.captured_at
+                FROM crddnst01m c
+                JOIN mrkaddr01d z ON z.zone_id = c.zone_id
+                WHERE z.market_id = %s
+                ORDER BY c.zone_id, c.captured_at DESC
                 """,
                 (market_id,),
             )
         return cur.fetchall()
 
 
-def fetch_radar_speed(market_id: int) -> dict[int, float]:
-    """구역별 최신 평균 이동 속도(레이더). zone_id -> avg_speed."""
-    with get_cursor() as cur:
-        cur.execute(
-            """
-            SELECT DISTINCT ON (s.zone_id) s.zone_id, r.avg_speed
-            FROM senrad01m r
-            JOIN sensens01m s ON s.sensor_id = r.sensor_id
-            WHERE s.market_id = %s
-            ORDER BY s.zone_id, r.updated_at DESC
-            """,
-            (market_id,),
-        )
-        return {r["zone_id"]: r["avg_speed"] for r in cur.fetchall() if r["avg_speed"] is not None}
-
-
-def fetch_acoustic_events(market_id: int, since: datetime | None = None) -> dict[int, dict]:
-    """구역별 이상 음향 이벤트 집계. zone_id -> {count, max_confidence}."""
-    sql = """
-        SELECT s.zone_id, COUNT(*) AS cnt, MAX(a.confidence) AS max_conf
-        FROM audevnt01m a
-        JOIN sensens01m s ON s.sensor_id = a.sensor_id
-        WHERE s.market_id = %s
+def insert_risk_results(assessments: list[dict]) -> int:
     """
-    params: list = [market_id]
-    if since is not None:
-        sql += " AND a.detected_at >= %s"
-        params.append(since)
-    sql += " GROUP BY s.zone_id"
-
-    with get_cursor() as cur:
-        cur.execute(sql, tuple(params))
-        return {
-            r["zone_id"]: {
-                "count": r["cnt"],
-                "max_confidence": float(r["max_conf"]) if r["max_conf"] is not None else None,
-            }
-            for r in cur.fetchall()
-        }
-
-
-def insert_risk_results(market_id: int, assessments: list[dict]) -> int:
-    """산출된 위험도를 mrkrisk01m에 기록한다."""
+    산출된 위험도를 mrkrisk01m에 기록한다.
+    MRKRISK01M에는 market_id가 없고 zone_id로만 시장을 식별한다.
+    """
     if not assessments:
         return 0
     with get_cursor() as cur:
         cur.executemany(
             "INSERT INTO mrkrisk01m "
-            "(market_id, zone_id, risk_score, risk_level, reason_code, detected_at) "
-            "VALUES (%s, %s, %s, %s, %s, NOW())",
+            "(zone_id, risk_score, risk_level, reason_code, detected_at) "
+            "VALUES (%s, %s, %s, %s, NOW())",
             [
-                (market_id, a["zoneId"], a["riskScore"], a["riskLevel"], a["reason"][:200])
+                (a["zoneId"], a["riskScore"], a["riskLevel"], a["reason"][:200])
                 for a in assessments
             ],
         )

@@ -4,8 +4,6 @@
 두 가지 운영 모드를 지원한다.
   - MIRROR   : 파이프라인 A. 센서 실측값을 그대로 반영해 현재 상태를 재현한다.
   - SCENARIO : 파이프라인 B. 초기 상태만 잡고 이후는 시뮬레이션 규칙으로 전개한다.
-              오브젝트(푸드트럭/장애물/행사존/휴게공간)와 통로 정책(폐쇄/개방/일방통행)을
-              반영해 결과가 배치에 따라 달라지도록 한다.
 """
 
 from __future__ import annotations
@@ -47,27 +45,10 @@ class ZoneSpec:
 
 @dataclass
 class ZoneObservation:
-    """센서에서 관측된 구역별 실측값."""
+    """센서에서 관측된 구역별 실측값. (레이더/음향 관측값은 2026-07-23부로 완전 제거)"""
 
     zone_id: int
     visitor_count: int = 0
-    avg_speed_cm_s: float | None = None
-    acoustic_event_count: int = 0
-    acoustic_max_confidence: float | None = None
-
-
-@dataclass
-class ZoneModifier:
-    """PlacedObject(오브젝트 배치)가 구역에 미치는 누적 효과."""
-
-    path_width_multiplier: float = 1.0
-    """장애물로 인한 통로 폭 감소 배율 (1.0 = 영향 없음)."""
-    attraction: float = 0.0
-    """0~1. 높을수록 에이전트가 이 구역으로 이동하려는 경향이 커짐 (푸드트럭/행사존)."""
-    occupancy_boost: float = 1.0
-    """행사존 체류 효과. 실제 인원보다 밀집도 계산 시 부풀리는 배율."""
-    density_relief: float = 1.0
-    """휴게공간 분산 효과. 1보다 작으면 밀집도를 낮춰서 계산."""
 
 
 @dataclass
@@ -80,9 +61,6 @@ class MarketLayout:
     zones: dict[int, ZoneSpec]
     graph: nx.Graph
     gates: list[dict] = field(default_factory=list)
-    raw_adjacency: list[dict] = field(default_factory=list)
-    """활성/비활성 여부와 무관하게 원본 인접 행을 그대로 보관.
-    통로 정책(폐쇄된 통로 개방 등)을 적용하려면 비활성 통로 정보도 필요하다."""
 
     @classmethod
     def from_db_rows(
@@ -97,7 +75,7 @@ class MarketLayout:
 
         market_row  : mrkaddr01m 1행
         zone_rows   : mrkaddr01d 목록 (polygon_coordinates는 GeoJSON 문자열)
-        adjacency_rows: mrkadjc01m 목록 (통로 정책 적용을 위해 활성/비활성 전부 전달할 것)
+        adjacency_rows: mrkadjc01m 목록 (is_active=True인 것만 전달할 것)
         gate_rows   : mrkfcts01m 중 facility_type='GATE' 목록
         """
         projection = LocalProjection(
@@ -146,8 +124,6 @@ class MarketLayout:
         for zone_id in zones:
             graph.add_node(zone_id)
         for row in adjacency_rows:
-            if not row.get("is_active", True):
-                continue
             graph.add_edge(
                 row["from_zone_id"],
                 row["to_zone_id"],
@@ -162,7 +138,6 @@ class MarketLayout:
             zones=zones,
             graph=graph,
             gates=gates,
-            raw_adjacency=adjacency_rows,
         )
 
 
@@ -176,8 +151,6 @@ class MarketDigitalTwin(Model):
         mode: SimulationMode = SimulationMode.MIRROR,
         placement_strategy: PlacementStrategy = PlacementStrategy.CENTERLINE,
         seed: int | None = None,
-        objects: list | None = None,
-        corridor_policies: list | None = None,
     ) -> None:
         super().__init__(seed=seed)
         self.layout = layout
@@ -186,11 +159,6 @@ class MarketDigitalTwin(Model):
         self.placement_strategy = placement_strategy
         self._rng = random.Random(seed)
 
-        # 통로 정책(폐쇄/개방/일방통행)을 반영한 실제 이동 가능 그래프.
-        # SCENARIO 모드가 아니거나 정책이 없으면 기존 layout.graph와 동일하게 동작한다.
-        self.movement_graph = self._build_movement_graph(corridor_policies or [])
-        self._modifiers: dict[int, ZoneModifier] = self._build_modifiers(objects or [])
-
         self._risk: dict[int, RiskAssessment] = {}
         self._exit_hops: dict[int, int] = self._compute_exit_hops()
 
@@ -198,74 +166,6 @@ class MarketDigitalTwin(Model):
         self.evaluate_risk()
 
     # ---------- 초기화 ----------
-
-    def _build_movement_graph(self, policies: list) -> nx.DiGraph:
-        """
-        통로 정책(폐쇄/개방/일방통행)을 반영한 실제 이동 가능 그래프.
-
-        기본은 DB의 is_active 값을 따르되, 정책이 있으면 그걸로 덮어쓴다.
-        일방통행이 있을 수 있으므로 방향 그래프(DiGraph)로 구성한다.
-        """
-        policy_map = {}
-        for p in policies:
-            key = tuple(sorted((p.fromZoneId, p.toZoneId)))
-            policy_map[key] = p
-
-        working = nx.DiGraph()
-        working.add_nodes_from(self.layout.zones.keys())
-
-        for row in self.layout.raw_adjacency:
-            a, b = row["from_zone_id"], row["to_zone_id"]
-            key = tuple(sorted((a, b)))
-            policy = policy_map.get(key)
-            base_open = bool(row.get("is_active", True))
-            weight = float(row.get("distance_m") or 1.0)
-
-            if policy is None:
-                if base_open:
-                    working.add_edge(a, b, weight=weight)
-                    working.add_edge(b, a, weight=weight)
-                continue
-
-            if policy.action == "close":
-                continue  # 양방향 다 막음
-            if policy.action == "open":
-                working.add_edge(a, b, weight=weight)
-                working.add_edge(b, a, weight=weight)
-            elif policy.action == "one_way":
-                if policy.allowedDirection == "to_from":
-                    working.add_edge(b, a, weight=weight)
-                else:  # 기본값: from_to
-                    working.add_edge(a, b, weight=weight)
-
-        return working
-
-    def _build_modifiers(self, objects: list) -> dict[int, ZoneModifier]:
-        """PlacedObject 목록을 구역별 누적 효과로 변환한다."""
-        mods: dict[int, ZoneModifier] = {
-            zid: ZoneModifier() for zid in self.layout.zones
-        }
-        for obj in objects:
-            mod = mods.get(obj.zoneId)
-            if mod is None:
-                continue  # 존재하지 않는 구역은 무시
-            if obj.objectType == "obstacle":
-                # 강도만큼 통로 폭을 줄임. 최소 15%는 남겨서 완전 봉쇄는 방지.
-                mod.path_width_multiplier = min(
-                    mod.path_width_multiplier, max(0.15, 1.0 - obj.intensity)
-                )
-            elif obj.objectType == "food_truck":
-                mod.attraction = max(mod.attraction, obj.intensity * 0.6)
-            elif obj.objectType == "event_zone":
-                mod.attraction = max(mod.attraction, obj.intensity * 0.9)
-                mod.occupancy_boost = max(mod.occupancy_boost, 1.0 + obj.intensity * 0.8)
-            elif obj.objectType == "rest_area":
-                mod.density_relief = min(mod.density_relief, max(0.4, 1.0 - obj.intensity * 0.6))
-        return mods
-
-    def attraction_of(self, zone_id: int) -> float:
-        mod = self._modifiers.get(zone_id)
-        return mod.attraction if mod else 0.0
 
     def _compute_exit_hops(self) -> dict[int, int]:
         """각 구역에서 가장 가까운 출구 구역까지의 홉 수."""
@@ -278,7 +178,7 @@ class MarketDigitalTwin(Model):
             best = None
             for exit_id in exit_zones:
                 try:
-                    d = nx.shortest_path_length(self.movement_graph, zone_id, exit_id)
+                    d = nx.shortest_path_length(self.layout.graph, zone_id, exit_id)
                 except (nx.NetworkXNoPath, nx.NodeNotFound):
                     continue
                 best = d if best is None else min(best, d)
@@ -305,21 +205,15 @@ class MarketDigitalTwin(Model):
     # ---------- 위험도 ----------
 
     def evaluate_risk(self) -> dict[int, RiskAssessment]:
-        """현재 상태 기준으로 구역별 위험도를 재계산한다. 오브젝트 효과를 반영한다."""
+        """현재 상태 기준으로 구역별 위험도를 재계산한다."""
         counts = self.current_zone_counts()
         self._risk = {}
         for zone_id, spec in self.layout.zones.items():
-            obs = self.observations.get(zone_id)
-            mod = self._modifiers.get(zone_id, ZoneModifier())
-            effective_count = counts.get(zone_id, 0) * mod.occupancy_boost * mod.density_relief
             self._risk[zone_id] = assess_zone(
                 zone_id=zone_id,
-                visitor_count=round(effective_count),
+                visitor_count=counts.get(zone_id, 0),
                 area_m2=spec.area_m2,
-                avg_speed_cm_s=obs.avg_speed_cm_s if obs else None,
-                acoustic_event_count=obs.acoustic_event_count if obs else 0,
-                acoustic_max_confidence=obs.acoustic_max_confidence if obs else None,
-                path_width_m=spec.path_width_m * mod.path_width_multiplier,
+                path_width_m=spec.path_width_m,
             )
         return self._risk
 
@@ -344,7 +238,7 @@ class MarketDigitalTwin(Model):
         current_hops = self._exit_hops.get(zone_id)
         if current_hops is None or current_hops == 0:
             return zone_id
-        for neighbor in self.movement_graph.neighbors(zone_id):
+        for neighbor in self.layout.graph.neighbors(zone_id):
             if self._exit_hops.get(neighbor, 99) < current_hops:
                 return neighbor
         return zone_id
@@ -401,8 +295,6 @@ class MarketDigitalTwin(Model):
                     "reason": r.reason,
                     "breakdown": {
                         "density": r.density_score,
-                        "flow": r.flow_score,
-                        "acoustic": r.acoustic_score,
                         "bottleneck": r.bottleneck_score,
                     },
                 }

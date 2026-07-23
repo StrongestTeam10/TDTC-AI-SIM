@@ -3,6 +3,26 @@
 
 ## 변경 이력
 
+### 2026-07-23 (레이더/음향 센서 완전 제거)
+- **결정**: 레이더 제거 결정과 함께, 지난번 "호출만 비활성화, 코드는 유지"했던 음향 센서
+  관련 코드도 이번에 전부 삭제
+- `risk.py`: `WEIGHT_FLOW`/`WEIGHT_ACOUSTIC` 상수, `flow_to_score()`/`acoustic_to_score()`
+  함수, `RiskAssessment.flow_score`/`acoustic_score` 필드 전부 삭제. 위험도 가중치는
+  density(0.55)/bottleneck(0.10) 2개만 남았고, 기존 "결측 지표 재정규화" 로직을 그대로
+  재사용해 두 지표만으로 100%를 채우도록 함 (실질 반영 비율 84.6% : 15.4%)
+- `model.py`: `ZoneObservation`에서 `avg_speed_cm_s`/`acoustic_event_count`/
+  `acoustic_max_confidence` 필드 제거, `snapshot()`의 `breakdown`도 density/bottleneck만 반환
+- `db/repository.py`: `fetch_radar_speed()`, `fetch_acoustic_events()` 함수 완전 삭제
+- `schemas/models.py`: `RiskBreakdown`, `ContributingFactors`에서 flow/acoustic 필드 제거
+  (⚠️ `ContributingFactors`는 파이프라인 B `ScenarioResult.finalRiskScore` 응답 계약이라
+  BE `RiskScoreDto.ContributingFactors`도 함께 수정함 — 담당 팀원 공유 필요)
+- `sensor-seed.sql`: 레이더 데이터 섹션(1,728건) 삭제, 센서 등록을 라이다 1대/구역으로 축소.
+  `scripts/generate_sensor_seed.py`로 재생성해서 검증함 (스크립트 자체도 레이더/음향 생성
+  로직 완전 삭제)
+- 모의 테스트로 `/simulate/snapshot`, `/simulate/scenario` 둘 다 정상 동작 확인 완료
+
+## 변경 이력 (이전)
+
 ### 2026-07-23
 - **파이프라인 B(`/simulate/scenario`) 응답 계약을 BE `ScenarioResultDto`에 맞춰 정식 구현**
   - 기존에는 `{scenarioType, steps, finalSnapshot, note}` 형태의 임시 dict를 반환했으나,
@@ -87,9 +107,11 @@ API 문서: http://localhost:8000/docs
 | 지표 | 가중치 | 산출 근거 |
 |---|---|---|
 | 밀집도 | 0.55 | 압사의 직접 원인 |
-| 이동 흐름 | 0.20 | 레이더 `avg_speed`, 자유보행 130cm/s 대비 저하율 |
-| 이상 음향 | 0.15 | 음향 이벤트 건수 × 신뢰도 |
 | 통로 병목 | 0.10 | 구역 인원의 대피 소요 시간 (5분 초과 시 최고점) |
+
+(2026-07-23: 레이더 기반 "이동 흐름"(0.20), 음향 기반 "이상 음향"(0.15) 지표는 센서 완전
+제거로 삭제됨. 남은 두 지표에 재정규화 로직이 그대로 적용되어 실질 반영 비율은
+84.6% : 15.4%)
 
 **가중치 재정규화**: 센서 미설치 등으로 데이터가 결측이면 해당 가중치를 제외하고 나머지로 100%를 재배분한다. 이 처리가 없으면 결측 지표가 0점으로 반영되어 밀집도가 아무리 높아도 상위 등급에 도달할 수 없다.
 
@@ -107,7 +129,7 @@ API 문서: http://localhost:8000/docs
 ## 알려진 한계 / 후속 작업
 
 - **개별 보행자 좌표는 근사값**이다. CCTV/LiDAR는 구역 단위 집계(`visitor_count`)만 제공하므로 실제 개인 위치는 복원 불가하며, 폴리곤 내부에 통계적 분포로 배치한다.
-- **음향 이벤트는 2026-07-23부로 사용 중단**되었다. 관련 DB 테이블(`audevnt01m/h`)이 제거되었고, 위험도 산출에서도 음향 지표는 항상 0으로 처리되어 자동으로 제외된다. (참고로 중단 전에는 비명 감지 등 밀집도와 무관한 사건을 밀집 위험 점수에 섞기보다 독립 알림 체계로 분리하는 것이 적절하다는 논의가 있었다.)
+- **레이더/음향 센서는 2026-07-23부로 완전히 제거**되었다. 관련 DB 테이블(`senradr01m/h`, `audevnt01m/h`), 리포지토리 함수, 위험도 가중치 항목까지 코드에서 전부 삭제되었다. (참고로 제거 전에는 비명 감지 등 밀집도와 무관한 사건을 밀집 위험 점수에 섞기보다 독립 알림 체계로 분리하는 것이 적절하다는 논의가 있었다.)
 - **파이프라인 B의 이벤트 모델 미구현**: 화재 확산, 음향 전파, 통로 폐쇄 영향 시뮬레이션.
 - **캘리브레이션 필요**: 현재 임계값은 일반 인파 기준이며, 실제 시장 특성(점포 배치, 상시 체류 인원 등)에 맞춘 보정이 필요하다.
 
