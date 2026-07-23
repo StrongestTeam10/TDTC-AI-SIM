@@ -34,7 +34,7 @@ STEP_DURATION_SECONDS = 10
 router = APIRouter(prefix="/simulate", tags=["simulate"])
 
 
-def _load_layout(market_id: int, active_only: bool = True) -> MarketLayout:
+def _load_layout(market_id: int) -> MarketLayout:
     market = repo.fetch_market(market_id)
     if market is None:
         raise HTTPException(status_code=404, detail=f"시장을 찾을 수 없습니다: {market_id}")
@@ -43,7 +43,7 @@ def _load_layout(market_id: int, active_only: bool = True) -> MarketLayout:
     if not zones:
         raise HTTPException(status_code=400, detail="구역 데이터가 없습니다")
 
-    adjacency = repo.fetch_adjacency(market_id, active_only=active_only)
+    adjacency = repo.fetch_adjacency(market_id)
     gates = repo.fetch_gates(market_id)
     return MarketLayout.from_db_rows(market, zones, adjacency, gates)
 
@@ -53,31 +53,20 @@ def simulate_snapshot(req: SnapshotRequest) -> SnapshotResponse:
     """
     파이프라인 A: 센서 실측값을 로드해 오브젝트를 배치하고 위험도를 산출한다.
 
-    CCTV(인구 밀집도) + 레이더(이동 속도) + 음향(이상 이벤트)을 종합한다.
+    CCTV(인구 밀집도)만 반영한다. 레이더(이동 속도)/음향(이상 이벤트)은
+    2026-07-23부로 완전히 제거되었다 (관련 테이블·리포지토리 함수·위험도
+    가중치 항목까지 전부 삭제).
     """
     layout = _load_layout(req.marketId)
 
     densities = repo.fetch_crowd_density(req.marketId, req.capturedAt)
-    speeds = repo.fetch_radar_speed(req.marketId)
-    # 음향 센서 데이터 사용 중단 결정 (audevnt01m/h 테이블 DB에서 제거됨).
-    # repo.fetch_acoustic_events()는 코드는 남겨두되 실제 호출은 비활성화한다.
-    # acoustics를 빈 dict로 두면 아래에서 acoustic_event_count=0으로 처리되고,
-    # risk.py의 가중치 재정규화 로직에 의해 종합 위험도 계산에서 음향 지표가 자동으로 제외된다.
-    acoustics: dict[int, dict] = {}
-    # reference_time = req.capturedAt or datetime.utcnow()
-    # acoustic_window = reference_time - timedelta(minutes=30)
-    # acoustics = repo.fetch_acoustic_events(req.marketId, since=acoustic_window, until=reference_time)
 
     observations: dict[int, ZoneObservation] = {}
     for row in densities:
         zid = row["zone_id"]
-        ac = acoustics.get(zid, {})
         observations[zid] = ZoneObservation(
             zone_id=zid,
             visitor_count=row["visitor_count"] or 0,
-            avg_speed_cm_s=speeds.get(zid),
-            acoustic_event_count=ac.get("count", 0),
-            acoustic_max_confidence=ac.get("max_confidence"),
         )
 
     model = MarketDigitalTwin(layout, observations, mode=SimulationMode.MIRROR)
@@ -114,21 +103,17 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     """
     파이프라인 B: 사용자 지정 What-if 시나리오.
 
-    레이아웃 로드 → 오브젝트(푸드트럭/장애물/행사존/휴게공간) 및 통로 정책
-    (폐쇄/개방/일방통행) 반영 → steps만큼 진행하며 매 스텝의 에이전트 상태를
+    레이아웃 로드 → 초기 배치 → steps만큼 진행하며 매 스텝의 에이전트 상태를
     frames로 누적하고, 대피 완료 시점과 최종 위험도를 산출해 반환한다.
 
     주의: eventZoneId/eventIntensity/scenarioType으로 지정하는 화재/음향전파 등
     "외부 충격 이벤트"는 아직 구현되어 있지 않다. 현재는 밀집도 기반 위험도가
-    임계치를 넘으면 에이전트가 자발적으로 대피를 시작하는 기본 이동 모델과,
-    오브젝트 배치·통로 정책에 따른 매력도/병목 보정이 함께 동작한다.
+    임계치를 넘으면 에이전트가 자발적으로 대피를 시작하는 기본 이동 모델만 동작한다.
     """
     requested_at = datetime.now(timezone.utc)
     scenario_id = str(uuid.uuid4())
 
-    # 통로 정책(폐쇄/개방)을 적용하려면 원래 비활성 상태였던 통로 정보도 필요하므로
-    # active_only=False로 전체를 가져온다.
-    layout = _load_layout(req.marketId, active_only=False)
+    layout = _load_layout(req.marketId)
 
     zone_ids = list(layout.zones.keys())
     if not zone_ids:
@@ -144,14 +129,7 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
         for zid in zone_ids
     }
 
-    model = MarketDigitalTwin(
-        layout,
-        observations,
-        mode=SimulationMode.SCENARIO,
-        seed=42,
-        objects=req.objects,
-        corridor_policies=req.corridorPolicies,
-    )
+    model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=42)
     exit_zone_ids = {zid for zid, spec in layout.zones.items() if spec.is_exit_zone}
 
     frames: list[list[dict]] = []
@@ -174,13 +152,12 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
         overall_level = top.level.value
         factors = ContributingFactors(
             density=top.density_score,
-            acoustic=top.acoustic_score,
-            flowRate=top.flow_score,
+            bottleneck=top.bottleneck_score,
         )
     else:
         overall_score = 0.0
         overall_level = score_to_level(0.0).value
-        factors = ContributingFactors(density=0.0, acoustic=0.0, flowRate=0.0)
+        factors = ContributingFactors(density=0.0, bottleneck=0.0)
 
     final_timestamp = requested_at + timedelta(seconds=req.steps * STEP_DURATION_SECONDS)
 
