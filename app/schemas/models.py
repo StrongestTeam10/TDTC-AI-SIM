@@ -72,3 +72,37 @@ class SnapshotResponse(BaseModel):
     zones: list[ZoneResult]
     agents: list[AgentState] = []
     persistedRiskRows: int = 0
+
+
+class ContributingFactors(BaseModel):
+    """BE RiskScoreDto.ContributingFactors와 1:1 매칭 (필드명 flowRate 주의 - flow 아님)."""
+
+    density: float
+    acoustic: float
+    flowRate: float
+
+
+class RiskScoreDto(BaseModel):
+    """BE RiskScoreDto와 1:1 매칭."""
+
+    timestamp: datetime
+    score: float
+    level: str
+    contributingFactors: ContributingFactors
+
+
+class ScenarioResult(BaseModel):
+    """
+    파이프라인 B 응답. BE ScenarioResultDto와 1:1 매칭.
+
+    frames: 스텝별 전체 에이전트 상태 (프론트 애니메이션 재생용).
+    evacuationTimeSeconds: 위험으로 대피를 시작한 에이전트 전원이 출구 구역에
+        도달하는 데 걸린 시간. 대피가 발생하지 않았거나 요청한 steps 내에
+        완료되지 못하면 None.
+    """
+
+    scenarioId: str
+    requestedAt: datetime
+    frames: list[list[AgentState]]
+    evacuationTimeSeconds: int | None
+    finalRiskScore: RiskScoreDto

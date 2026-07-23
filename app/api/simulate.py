@@ -1,16 +1,35 @@
 """시뮬레이션 엔드포인트."""
 from __future__ import annotations
 
+import uuid
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, HTTPException
 
 from app.db import repository as repo
-from app.schemas.models import ScenarioRequest, SnapshotRequest, SnapshotResponse
+from app.schemas.models import (
+    ContributingFactors,
+    RiskScoreDto,
+    ScenarioRequest,
+    ScenarioResult,
+    SnapshotRequest,
+    SnapshotResponse,
+)
+from app.simulation.agents import VisitorState
 from app.simulation.model import (
     MarketDigitalTwin,
     MarketLayout,
     SimulationMode,
     ZoneObservation,
 )
+from app.simulation.risk import score_to_level
+
+# 시나리오 시뮬레이션의 1 step이 실제 몇 초에 해당하는지에 대한 가정값.
+# 현재 이동 모델(VisitorAgent._move_toward_exit)은 거리와 무관하게 매 스텝마다
+# 인접 구역 1칸을 이동하므로, 실측 보행 속도에 기반한 정확한 환산이 아니라
+# 대피소요시간을 대략적으로 가늠하기 위한 임시 캘리브레이션 값이다.
+# 추후 구역 간 실제 거리(mrkadjc01m.distance_m)와 평균 보행속도를 반영해 재산정 필요.
+STEP_DURATION_SECONDS = 10
 
 router = APIRouter(prefix="/simulate", tags=["simulate"])
 
@@ -40,7 +59,14 @@ def simulate_snapshot(req: SnapshotRequest) -> SnapshotResponse:
 
     densities = repo.fetch_crowd_density(req.marketId, req.capturedAt)
     speeds = repo.fetch_radar_speed(req.marketId)
-    acoustics = repo.fetch_acoustic_events(req.marketId)
+    # 음향 센서 데이터 사용 중단 결정 (audevnt01m/h 테이블 DB에서 제거됨).
+    # repo.fetch_acoustic_events()는 코드는 남겨두되 실제 호출은 비활성화한다.
+    # acoustics를 빈 dict로 두면 아래에서 acoustic_event_count=0으로 처리되고,
+    # risk.py의 가중치 재정규화 로직에 의해 종합 위험도 계산에서 음향 지표가 자동으로 제외된다.
+    acoustics: dict[int, dict] = {}
+    # reference_time = req.capturedAt or datetime.utcnow()
+    # acoustic_window = reference_time - timedelta(minutes=30)
+    # acoustics = repo.fetch_acoustic_events(req.marketId, since=acoustic_window, until=reference_time)
 
     observations: dict[int, ZoneObservation] = {}
     for row in densities:
@@ -59,7 +85,7 @@ def simulate_snapshot(req: SnapshotRequest) -> SnapshotResponse:
 
     persisted = 0
     if req.persistRisk:
-        persisted = repo.insert_risk_results(req.marketId, snap["zones"])
+        persisted = repo.insert_risk_results(snap["zones"])
 
     if not req.includeAgents:
         snap["agents"] = []
@@ -67,14 +93,37 @@ def simulate_snapshot(req: SnapshotRequest) -> SnapshotResponse:
     return SnapshotResponse(**snap, persistedRiskRows=persisted)
 
 
-@router.post("/scenario")
-def simulate_scenario(req: ScenarioRequest) -> dict:
+def _frame_agents(model: MarketDigitalTwin) -> list[dict]:
+    """현재 스텝의 에이전트 상태를 AgentState 스키마 형태(dict)로 직렬화."""
+    projection = model.layout.projection
+    frame = []
+    for agent in model.agents:
+        lat, lon = projection.to_latlon(agent.x, agent.y)
+        frame.append(
+            {
+                **agent.to_dict(),
+                "latitude": round(lat, 8),
+                "longitude": round(lon, 8),
+            }
+        )
+    return frame
+
+
+@router.post("/scenario", response_model=ScenarioResult)
+def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     """
     파이프라인 B: 사용자 지정 What-if 시나리오.
 
-    현재는 레이아웃 로드와 초기 배치까지만 구현되어 있으며,
-    화재 확산/음향 전파 등 이벤트 모델은 후속 작업으로 남아 있다.
+    레이아웃 로드 → 초기 배치 → steps만큼 진행하며 매 스텝의 에이전트 상태를
+    frames로 누적하고, 대피 완료 시점과 최종 위험도를 산출해 반환한다.
+
+    주의: eventZoneId/eventIntensity/scenarioType으로 지정하는 화재/음향전파 등
+    "외부 충격 이벤트"는 아직 구현되어 있지 않다. 현재는 밀집도 기반 위험도가
+    임계치를 넘으면 에이전트가 자발적으로 대피를 시작하는 기본 이동 모델만 동작한다.
     """
+    requested_at = datetime.now(timezone.utc)
+    scenario_id = str(uuid.uuid4())
+
     layout = _load_layout(req.marketId)
 
     zone_ids = list(layout.zones.keys())
@@ -92,15 +141,47 @@ def simulate_scenario(req: ScenarioRequest) -> dict:
     }
 
     model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=42)
+    exit_zone_ids = {zid for zid, spec in layout.zones.items() if spec.is_exit_zone}
 
-    frames = []
-    for _ in range(req.steps):
+    frames: list[list[dict]] = []
+    evacuation_seconds: int | None = None
+    for step_index in range(req.steps):
         model.step()
-        frames.append(model.snapshot())
+        frames.append(_frame_agents(model))
 
-    return {
-        "scenarioType": req.scenarioType,
-        "steps": req.steps,
-        "finalSnapshot": frames[-1] if frames else None,
-        "note": "이벤트 모델(화재/음향 전파) 미구현 - 현재는 기본 이동/위험도 평가만 수행",
-    }
+        if evacuation_seconds is None:
+            evacuating = [a for a in model.agents if a.state is VisitorState.EVACUATING]
+            if evacuating and all(a.zone_id in exit_zone_ids for a in evacuating):
+                evacuation_seconds = (step_index + 1) * STEP_DURATION_SECONDS
+
+    # 최종 위험도: 구역 중 가장 높은 점수를 종합 위험도로 삼는다 (snapshot()의 overallRiskScore와 동일 기준).
+    # contributingFactors는 그 최고 위험 구역의 세부 지표를 그대로 사용한다.
+    risk_by_zone = model.risk
+    if risk_by_zone:
+        top = max(risk_by_zone.values(), key=lambda r: r.score)
+        overall_score = top.score
+        overall_level = top.level.value
+        factors = ContributingFactors(
+            density=top.density_score,
+            acoustic=top.acoustic_score,
+            flowRate=top.flow_score,
+        )
+    else:
+        overall_score = 0.0
+        overall_level = score_to_level(0.0).value
+        factors = ContributingFactors(density=0.0, acoustic=0.0, flowRate=0.0)
+
+    final_timestamp = requested_at + timedelta(seconds=req.steps * STEP_DURATION_SECONDS)
+
+    return ScenarioResult(
+        scenarioId=scenario_id,
+        requestedAt=requested_at,
+        frames=frames,
+        evacuationTimeSeconds=evacuation_seconds,
+        finalRiskScore=RiskScoreDto(
+            timestamp=final_timestamp,
+            score=overall_score,
+            level=overall_level,
+            contributingFactors=factors,
+        ),
+    )
