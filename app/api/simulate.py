@@ -34,7 +34,7 @@ STEP_DURATION_SECONDS = 10
 router = APIRouter(prefix="/simulate", tags=["simulate"])
 
 
-def _load_layout(market_id: int) -> MarketLayout:
+def _load_layout(market_id: int, active_only: bool = True) -> MarketLayout:
     market = repo.fetch_market(market_id)
     if market is None:
         raise HTTPException(status_code=404, detail=f"시장을 찾을 수 없습니다: {market_id}")
@@ -43,7 +43,7 @@ def _load_layout(market_id: int) -> MarketLayout:
     if not zones:
         raise HTTPException(status_code=400, detail="구역 데이터가 없습니다")
 
-    adjacency = repo.fetch_adjacency(market_id)
+    adjacency = repo.fetch_adjacency(market_id, active_only=active_only)
     gates = repo.fetch_gates(market_id)
     return MarketLayout.from_db_rows(market, zones, adjacency, gates)
 
@@ -114,17 +114,21 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     """
     파이프라인 B: 사용자 지정 What-if 시나리오.
 
-    레이아웃 로드 → 초기 배치 → steps만큼 진행하며 매 스텝의 에이전트 상태를
+    레이아웃 로드 → 오브젝트(푸드트럭/장애물/행사존/휴게공간) 및 통로 정책
+    (폐쇄/개방/일방통행) 반영 → steps만큼 진행하며 매 스텝의 에이전트 상태를
     frames로 누적하고, 대피 완료 시점과 최종 위험도를 산출해 반환한다.
 
     주의: eventZoneId/eventIntensity/scenarioType으로 지정하는 화재/음향전파 등
     "외부 충격 이벤트"는 아직 구현되어 있지 않다. 현재는 밀집도 기반 위험도가
-    임계치를 넘으면 에이전트가 자발적으로 대피를 시작하는 기본 이동 모델만 동작한다.
+    임계치를 넘으면 에이전트가 자발적으로 대피를 시작하는 기본 이동 모델과,
+    오브젝트 배치·통로 정책에 따른 매력도/병목 보정이 함께 동작한다.
     """
     requested_at = datetime.now(timezone.utc)
     scenario_id = str(uuid.uuid4())
 
-    layout = _load_layout(req.marketId)
+    # 통로 정책(폐쇄/개방)을 적용하려면 원래 비활성 상태였던 통로 정보도 필요하므로
+    # active_only=False로 전체를 가져온다.
+    layout = _load_layout(req.marketId, active_only=False)
 
     zone_ids = list(layout.zones.keys())
     if not zone_ids:
@@ -140,7 +144,14 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
         for zid in zone_ids
     }
 
-    model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=42)
+    model = MarketDigitalTwin(
+        layout,
+        observations,
+        mode=SimulationMode.SCENARIO,
+        seed=42,
+        objects=req.objects,
+        corridor_policies=req.corridorPolicies,
+    )
     exit_zone_ids = {zid for zid, spec in layout.zones.items() if spec.is_exit_zone}
 
     frames: list[list[dict]] = []

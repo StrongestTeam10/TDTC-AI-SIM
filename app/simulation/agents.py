@@ -26,6 +26,9 @@ class VisitorAgent(Agent):
     파이프라인 A(실측 미러링)에서는 센서 집계값으로 위치가 결정되므로
     이동 로직이 거의 사용되지 않지만, 파이프라인 B(What-if 시나리오)에서
     동일한 에이전트를 재사용하기 위해 이동/대피 로직을 함께 정의한다.
+
+    평상시(NORMAL)에는 배치된 오브젝트(푸드트럭/행사존)의 매력도(attraction)에
+    이끌려 인접 구역으로 이동할 수 있다.
     """
 
     def __init__(
@@ -57,6 +60,7 @@ class VisitorAgent(Agent):
             self.state = VisitorState.CONGESTED
         else:
             self.state = VisitorState.NORMAL
+            self._maybe_move_toward_attraction()
 
     def _move_toward_exit(self) -> None:
         """가장 가까운 출구 방향의 인접 구역으로 이동한다."""
@@ -64,6 +68,19 @@ class VisitorAgent(Agent):
         if next_zone is not None and next_zone != self.zone_id:
             self.zone_id = next_zone
             self.x, self.y = self.model.random_point_in_zone(next_zone)
+
+    def _maybe_move_toward_attraction(self) -> None:
+        """푸드트럭/행사존처럼 매력도가 높은 인접 구역으로 확률적으로 이동한다."""
+        current_attraction = self.model.attraction_of(self.zone_id)
+        best_zone, best_attraction = self.zone_id, current_attraction
+        for neighbor in self.model.movement_graph.neighbors(self.zone_id):
+            a = self.model.attraction_of(neighbor)
+            if a > best_attraction:
+                best_zone, best_attraction = neighbor, a
+
+        if best_zone != self.zone_id and random.random() < best_attraction:
+            self.zone_id = best_zone
+            self.x, self.y = self.model.random_point_in_zone(best_zone)
 
     def to_dict(self) -> dict:
         return {

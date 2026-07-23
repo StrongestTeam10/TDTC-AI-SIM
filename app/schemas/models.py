@@ -21,15 +21,46 @@ class SnapshotRequest(BaseModel):
     )
 
 
+class PlacedObject(BaseModel):
+    """지도 위에 사용자가 배치한 오브젝트 하나 (구역 단위)."""
+
+    objectType: str = Field(
+        ..., description="food_truck | obstacle | event_zone | rest_area"
+    )
+    zoneId: int
+    intensity: float = Field(
+        0.5, ge=0.0, le=1.0, description="효과 강도. 오브젝트 종류별로 의미가 다름"
+    )
+
+
+class CorridorPolicy(BaseModel):
+    """통로(구역 간 연결)에 대한 정책. 구역 하나가 아니라 두 구역 사이를 가리킨다."""
+
+    fromZoneId: int
+    toZoneId: int
+    action: str = Field(..., description="close | open | one_way")
+    allowedDirection: str | None = Field(
+        None, description="action이 one_way일 때만 사용: from_to | to_from"
+    )
+
+
 class ScenarioRequest(BaseModel):
     """파이프라인 B: 사용자 지정 시나리오 요청."""
 
     marketId: int
     agentCount: int = Field(..., ge=1, le=100_000)
-    scenarioType: str = Field("none", description="none | fire | acoustic_anomaly | corridor_block")
+    scenarioType: str = Field(
+        "none", description="none | fire | acoustic_anomaly | corridor_block"
+    )
     eventZoneId: int | None = None
     eventIntensity: float = Field(0.5, ge=0.0, le=1.0)
     steps: int = Field(50, ge=1, le=1000)
+    objects: list[PlacedObject] = Field(
+        default_factory=list, description="배치한 오브젝트(푸드트럭/장애물/행사존/휴게공간) 목록"
+    )
+    corridorPolicies: list[CorridorPolicy] = Field(
+        default_factory=list, description="통로 폐쇄/개방/일방통행 정책 목록"
+    )
 
 
 class RiskBreakdown(BaseModel):
