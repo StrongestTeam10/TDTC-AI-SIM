@@ -1,0 +1,394 @@
+{
+  "report_meta": {
+    "report_id": "RPT-DB-FACILITY-20260721-001",
+    "report_title": null,
+    "decision_question": "보행약자 접근성을 높이면서 남문 주변 체류 혼잡을 줄일 수 있는 시설 재배치안은 무엇인가?",
+    "disclaimer": "본 문서는 DB 구조 Mock 데이터를 바탕으로 자동 생성한 사전검토 초안입니다."
+  },
+  "change_id": 73001,
+  "market": {
+    "market_id": "MKT-001",
+    "market_name": "망원시장",
+    "latitude": null,
+    "longitude": null
+  },
+  "scenario_rows": [
+    {
+      "scenario_id": 130001,
+      "change_id": 73001,
+      "scenario_name": "현행 시설 배치",
+      "market_id": "MKT-001",
+      "virtual_config": {
+        "is_baseline": true,
+        "simulation_context": {
+          "analysis_date": "2026-07-21",
+          "simulation_start": "2026-08-15T17:00:00",
+          "simulation_end": "2026-08-15T22:00:00",
+          "expected_visitors": 2600,
+          "assumptions": [
+            "방문객 유입은 17시부터 증가해 19시 30분에 최고치에 도달한다.",
+            "점포와 고정 시설물의 위치는 시뮬레이션 기간 동안 변하지 않는다.",
+            "방문객은 혼잡 구역을 회피하되 목적지 선호를 유지한다.",
+            "결과는 동일 조건에서 20회 반복한 평균과 최대값을 사용한다."
+          ],
+          "model_version": "mesa-abm-mock-0.2",
+          "random_seed": 42,
+          "repetitions": 20,
+          "density_risk_threshold_p_m2": 6
+        }
+      },
+      "space_mod_data": {
+        "layout_version": "mock-layout-v1",
+        "interventions": []
+      },
+      "reg_datetime": "2026-07-21T09:00:00+09:00",
+      "agent_count": 2600,
+      "policy_type_code": "FACIL",
+      "created_at": "2026-07-21T09:00:00+09:00"
+    },
+    {
+      "scenario_id": 130002,
+      "change_id": 73001,
+      "scenario_name": "대안 A: 휴게공간 분산 배치",
+      "market_id": "MKT-001",
+      "virtual_config": {
+        "is_baseline": false,
+        "simulation_context": {
+          "analysis_date": "2026-07-21",
+          "simulation_start": "2026-08-15T17:00:00",
+          "simulation_end": "2026-08-15T22:00:00",
+          "expected_visitors": 2600,
+          "weather": "구름 많음",
+          "temperature_c": 27.0,
+          "rain_probability_pct": 20,
+          "assumptions": [
+            "방문객 유입은 17시부터 증가해 19시 30분에 최고치에 도달한다.",
+            "점포와 고정 시설물의 위치는 시뮬레이션 기간 동안 변하지 않는다.",
+            "방문객은 혼잡 구역을 회피하되 목적지 선호를 유지한다.",
+            "결과는 동일 조건에서 20회 반복한 평균과 최대값을 사용한다."
+          ],
+          "model_version": "mesa-abm-mock-0.2",
+          "random_seed": 42,
+          "repetitions": 20
+        }
+      },
+      "space_mod_data": {
+        "layout_version": "mock-layout-v1",
+        "interventions": [
+          {
+            "intervention_type": "one_way",
+            "target_zone": "중앙통로",
+            "description": "북문에서 남문 방향 일방통행 적용",
+            "parameters": {
+              "direction": "N_TO_S"
+            }
+          },
+          {
+            "intervention_type": "signage",
+            "target_zone": "북문·남문",
+            "description": "유도표지 4개 설치",
+            "parameters": {
+              "count": 4
+            }
+          }
+        ]
+      },
+      "reg_datetime": "2026-07-21T09:00:00+09:00",
+      "agent_count": 2600,
+      "policy_type_code": "FACIL",
+      "created_at": "2026-07-21T09:00:00+09:00"
+    },
+    {
+      "scenario_id": 130003,
+      "change_id": 73001,
+      "scenario_name": "대안 B: 보행약자 우선 재배치",
+      "market_id": "MKT-001",
+      "virtual_config": {
+        "is_baseline": false,
+        "simulation_context": {
+          "analysis_date": "2026-07-21",
+          "simulation_start": "2026-08-15T17:00:00",
+          "simulation_end": "2026-08-15T22:00:00",
+          "expected_visitors": 2600,
+          "weather": "구름 많음",
+          "temperature_c": 27.0,
+          "rain_probability_pct": 20,
+          "assumptions": [
+            "방문객 유입은 17시부터 증가해 19시 30분에 최고치에 도달한다.",
+            "점포와 고정 시설물의 위치는 시뮬레이션 기간 동안 변하지 않는다.",
+            "방문객은 혼잡 구역을 회피하되 목적지 선호를 유지한다.",
+            "결과는 동일 조건에서 20회 반복한 평균과 최대값을 사용한다."
+          ],
+          "model_version": "mesa-abm-mock-0.2",
+          "random_seed": 42,
+          "repetitions": 20
+        }
+      },
+      "space_mod_data": {
+        "layout_version": "mock-layout-v1",
+        "interventions": [
+          {
+            "intervention_type": "one_way",
+            "target_zone": "중앙통로",
+            "description": "북문에서 남문 방향 일방통행 적용",
+            "parameters": {
+              "direction": "N_TO_S"
+            }
+          },
+          {
+            "intervention_type": "gate_open",
+            "target_zone": "동문",
+            "description": "17~21시 임시 입구 운영",
+            "parameters": {
+              "open": "17:00",
+              "close": "21:00"
+            }
+          },
+          {
+            "intervention_type": "staffing",
+            "target_zone": "북문·동문",
+            "description": "안내요원 2명 배치",
+            "parameters": {
+              "count": 2
+            }
+          }
+        ]
+      },
+      "reg_datetime": "2026-07-21T09:00:00+09:00",
+      "agent_count": 2600,
+      "policy_type_code": "FACIL",
+      "created_at": "2026-07-21T09:00:00+09:00"
+    }
+  ],
+  "result_rows": [
+    {
+      "result_id": 230001,
+      "scenario_id": 130001,
+      "predicted_max_density": 5.7,
+      "predicted_density": 2.8,
+      "predicted_risk_score": 78,
+      "economic_effect_analysis": null,
+      "generated_report_path": null,
+      "avg_stay_time": "PT39.0M",
+      "flow_direction": {
+        "mode": "existing",
+        "direction": "BIDIRECTIONAL"
+      },
+      "executed_at": "2026-08-15T22:00:00"
+    },
+    {
+      "result_id": 230002,
+      "scenario_id": 130002,
+      "predicted_max_density": 4.4,
+      "predicted_density": 2.3,
+      "predicted_risk_score": 53,
+      "economic_effect_analysis": null,
+      "generated_report_path": null,
+      "avg_stay_time": "PT40.0M",
+      "flow_direction": {
+        "mode": "one_way",
+        "target_zone": "중앙통로",
+        "direction": "N_TO_S"
+      },
+      "executed_at": "2026-08-15T22:00:00"
+    },
+    {
+      "result_id": 230003,
+      "scenario_id": 130003,
+      "predicted_max_density": 4.8,
+      "predicted_density": 2.4,
+      "predicted_risk_score": 58,
+      "economic_effect_analysis": null,
+      "generated_report_path": null,
+      "avg_stay_time": "PT41.0M",
+      "flow_direction": {
+        "mode": "one_way",
+        "target_zone": "중앙통로",
+        "direction": "N_TO_S"
+      },
+      "executed_at": "2026-08-15T22:00:00"
+    }
+  ],
+  "density_timeseries_rows": [
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 0,
+      "predicted_max_density": 1.77,
+      "predicted_density": 0.87
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 10,
+      "predicted_max_density": 2.68,
+      "predicted_density": 1.32
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 20,
+      "predicted_max_density": 4.05,
+      "predicted_density": 1.99
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 30,
+      "predicted_max_density": 5.13,
+      "predicted_density": 2.52
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 40,
+      "predicted_max_density": 5.7,
+      "predicted_density": 2.8
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 50,
+      "predicted_max_density": 5.19,
+      "predicted_density": 2.55
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 60,
+      "predicted_max_density": 4.5,
+      "predicted_density": 2.21
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 70,
+      "predicted_max_density": 3.42,
+      "predicted_density": 1.68
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 80,
+      "predicted_max_density": 2.51,
+      "predicted_density": 1.23
+    },
+    {
+      "result_id": 230001,
+      "elapsed_minutes": 90,
+      "predicted_max_density": 2,
+      "predicted_density": 0.98
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 0,
+      "predicted_max_density": 1.36,
+      "predicted_density": 0.71
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 10,
+      "predicted_max_density": 2.07,
+      "predicted_density": 1.08
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 20,
+      "predicted_max_density": 3.12,
+      "predicted_density": 1.63
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 30,
+      "predicted_max_density": 3.96,
+      "predicted_density": 2.07
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 40,
+      "predicted_max_density": 4.4,
+      "predicted_density": 2.3
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 50,
+      "predicted_max_density": 4,
+      "predicted_density": 2.09
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 60,
+      "predicted_max_density": 3.48,
+      "predicted_density": 1.82
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 70,
+      "predicted_max_density": 2.64,
+      "predicted_density": 1.38
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 80,
+      "predicted_max_density": 1.94,
+      "predicted_density": 1.01
+    },
+    {
+      "result_id": 230002,
+      "elapsed_minutes": 90,
+      "predicted_max_density": 1.54,
+      "predicted_density": 0.8
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 0,
+      "predicted_max_density": 1.49,
+      "predicted_density": 0.74
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 10,
+      "predicted_max_density": 2.26,
+      "predicted_density": 1.13
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 20,
+      "predicted_max_density": 3.41,
+      "predicted_density": 1.7
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 30,
+      "predicted_max_density": 4.32,
+      "predicted_density": 2.16
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 40,
+      "predicted_max_density": 4.8,
+      "predicted_density": 2.4
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 50,
+      "predicted_max_density": 4.37,
+      "predicted_density": 2.18
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 60,
+      "predicted_max_density": 3.79,
+      "predicted_density": 1.9
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 70,
+      "predicted_max_density": 2.88,
+      "predicted_density": 1.44
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 80,
+      "predicted_max_density": 2.11,
+      "predicted_density": 1.06
+    },
+    {
+      "result_id": 230003,
+      "elapsed_minutes": 90,
+      "predicted_max_density": 1.68,
+      "predicted_density": 0.84
+    }
+  ]
+}

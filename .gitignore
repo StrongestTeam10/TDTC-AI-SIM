@@ -7,3 +7,6 @@ venv/
 .idea/
 .vscode/
 .DS_Store
+knowledge/vector_index.json
+knowledge/source_docs/*.pdf
+outputs/
