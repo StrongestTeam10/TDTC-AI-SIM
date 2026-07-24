@@ -31,17 +31,39 @@ class PlacementStrategy(str, Enum):
 def _random_point_in_polygon(
     poly: Polygon,
     rng: random.Random,
-    max_attempts: int = 100,
+    max_attempts: int = 200,
 ) -> Point | None:
     """
     폴리곤 내부의 무작위 점 하나를 생성(rejection sampling).
 
-    폴리곤이 매우 가늘면 실패 확률이 높아지므로, 실패 시 None을 반환하고
-    호출부에서 대표점(representative_point)으로 대체하도록 한다.
+    2026-07-24: 축 정렬 경계 상자(poly.bounds) 대신 최소 회전 사각형
+    (minimum_rotated_rectangle) 안에서 후보를 뽑도록 변경. 대각선으로 길게 뻗은
+    좁은 폴리곤(실제 시장 골목 모양)은 축 정렬 경계 상자가 실제 면적보다 훨씬
+    커서 거부율이 매우 높았고, 실패 시 같은 대표점에 계속 몰리는 문제가 있었음.
+
+    폴리곤이 매우 가늘면(회전 사각형으로도) 실패 확률이 높아지므로, 실패 시
+    None을 반환하고 호출부에서 대표점(representative_point)으로 대체하도록 한다.
     """
-    minx, miny, maxx, maxy = poly.bounds
+    mrr = poly.minimum_rotated_rectangle
+    coords = list(mrr.exterior.coords)[:4]
+    if len(coords) < 4:
+        # 극단적으로 퇴화한(선/점) 폴리곤 - 기존 방식으로 폴백
+        minx, miny, maxx, maxy = poly.bounds
+        for _ in range(max_attempts):
+            p = Point(rng.uniform(minx, maxx), rng.uniform(miny, maxy))
+            if poly.contains(p):
+                return p
+        return None
+
+    origin = coords[0]
+    v1 = (coords[1][0] - origin[0], coords[1][1] - origin[1])
+    v2 = (coords[3][0] - origin[0], coords[3][1] - origin[1])
+
     for _ in range(max_attempts):
-        p = Point(rng.uniform(minx, maxx), rng.uniform(miny, maxy))
+        u, v = rng.uniform(0.0, 1.0), rng.uniform(0.0, 1.0)
+        x = origin[0] + v1[0] * u + v2[0] * v
+        y = origin[1] + v1[1] * u + v2[1] * v
+        p = Point(x, y)
         if poly.contains(p):
             return p
     return None

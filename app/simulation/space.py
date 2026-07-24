@@ -12,7 +12,7 @@ import json
 import math
 from dataclasses import dataclass, field
 
-from shapely.geometry import Polygon, Point, shape
+from shapely.geometry import Polygon, Point, LineString, shape
 
 # 위도 1도당 미터 (WGS84 평균)
 METERS_PER_DEG_LAT = 111_132.0
@@ -62,6 +62,19 @@ def parse_polygon(geojson_text: str | dict) -> Polygon:
     geom = shape(data)
     if not isinstance(geom, Polygon):
         raise ValueError(f"Polygon이 아닌 지오메트리: {geom.geom_type}")
+    return geom
+
+
+def parse_linestring(geojson_text: str | dict) -> LineString:
+    """
+    통로 중심선(mrkadjc01m.path_coordinates, GeoJSON LineString 문자열)을
+    shapely LineString으로 변환. 2026-07-24 추가.
+    GeoJSON 좌표 순서는 [경도, 위도]임에 주의.
+    """
+    data = json.loads(geojson_text) if isinstance(geojson_text, str) else geojson_text
+    geom = shape(data)
+    if not isinstance(geom, LineString):
+        raise ValueError(f"LineString이 아닌 지오메트리: {geom.geom_type}")
     return geom
 
 

@@ -110,3 +110,52 @@ class ScenarioResult(BaseModel):
     frames: list[list[AgentState]]
     evacuationTimeSeconds: int | None
     finalRiskScore: RiskScoreDto
+
+
+class PredictRequest(BaseModel):
+    """
+    2026-07-24 추가: 실측 상태에서 출발한 예측 시뮬레이션 요청.
+
+    파이프라인 B(ScenarioRequest)와 달리 화재 등 외부 충격 이벤트를 다루지 않는다.
+    실제 관측된 인원 배치를 초기 상태로 삼아, 매대(오브젝트) 매력도 기반 자연스러운
+    이동과 게이트를 통한 신규 유입만으로 "인구가 몰렸을 때" 위험도가 어떻게
+    전개되는지를 본다.
+    """
+
+    marketId: int
+    capturedAt: datetime | None = Field(
+        None, description="예측의 출발점이 되는 실측 시점. 미지정 시 최신 관측값 사용"
+    )
+    steps: int = Field(30, ge=1, le=1000)
+    totalInflow: int = Field(
+        0, ge=0, le=100_000,
+        description=(
+            "전체 시뮬레이션 동안 게이트로 유입될 총 인원수. 스텝마다 무작위 인원이 "
+            "유입되고 합계가 이 값에 맞춰짐(스텝당 고정 인원이 아님). 0이면 신규 유입 없음"
+        ),
+    )
+    seed: int | None = None
+
+
+class ZoneRiskPoint(BaseModel):
+    """예측 결과의 스텝별 구역 위험도 (그래프용, ZoneResult보다 가벼운 요약)."""
+
+    zoneId: int
+    riskScore: float
+    riskLevel: str
+
+
+class RiskTrendPoint(BaseModel):
+    step: int
+    overallRiskScore: float
+    zones: list[ZoneRiskPoint]
+
+
+class PredictResult(BaseModel):
+    """예측 시뮬레이션 응답."""
+
+    predictionId: str
+    requestedAt: datetime
+    frames: list[list[AgentState]]
+    riskTrend: list[RiskTrendPoint]
+    finalOverallRiskScore: float
