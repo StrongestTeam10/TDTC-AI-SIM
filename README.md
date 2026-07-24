@@ -59,27 +59,85 @@
 | A. 관제/분석 | `POST /simulate/snapshot` | MIRROR | 센서 실측값을 로드해 오브젝트 배치 + 위험도 산출 |
 | B. 시나리오 | `POST /simulate/scenario` | SCENARIO | 사용자 지정 What-if 실험. 응답 계약(frames/evacuationTimeSeconds/finalRiskScore) 구현 완료, 화재/음향전파 등 이벤트 모델 자체는 미구현 |
 
+### 정책 시뮬레이션 결과 보고서 생성
+
+```text
+정책 시나리오 실행
+    ↓
+시뮬레이션 결과 저장
+    ↓
+사용자가 [보고서 생성] 버튼 선택
+    ↓
+Spring Boot가 change_id 기준으로 기준안·대안 결과 조회
+    ↓
+POST /simulation/reports
+    ↓
+지표 비교 + 공공문서 RAG 검색 + LLM 본문 생성
+    ↓
+DOCX 및 분석 JSON 생성
+    ↓
+GET /simulation/reports/{report_id}/docx
+```
+
+#### 보고서 관련 API
+| 엔드포인트 |	용도 |
+|---|---|
+| `POST /simulation/reports` | 저장된 시뮬레이션 결과를 바탕으로 보고서 생성 |
+| `GET /simulation/reports/{report_id}/docx` | 생성된 DOCX 다운로드 |
+| `GET /simulation/reports/{report_id}/analysis` | 지표 비교와 RAG 근거 JSON 조회 |
+| `GET /simulation/reports/status` | 보고서 검색기와 본문 생성기 상태 확인 |
+| `POST /simulation/reports/file` | DOCX를 즉시 반환하는 테스트·시연용 API |
+| `POST /simulation/reports/mock/{mock_name}` | ERD Mock 기반 개발용 API |
+
 ## 폴더 구조
 
 ```text
 app/
-├── main.py              FastAPI 진입점
-├── config.py            환경설정
+├── main.py                 FastAPI 진입점
+├── config.py               환경설정
 ├── api/
-│   ├── health.py        헬스체크 (/health, /health/db)
-│   └── simulate.py      시뮬레이션 엔드포인트
+│   ├── health.py           헬스체크 (/health, /health/db)
+│   ├── simulate.py         시뮬레이션 엔드포인트
+│   └── reports.py          보고서 생성·DOCX 다운로드·분석 JSON 조회 엔드포인트
 ├── schemas/
-│   └── models.py        요청/응답 스키마 (Spring Boot DTO와 camelCase 일치)
+│   ├── models.py           요청/응답 스키마 (Spring Boot DTO와 camelCase 일치)
+│   ├── report_db_models.py Spring Boot가 전달하는 ERD 조회 DTO
+│   └── report_models.py    보고서 파이프라인 내부 모델
 ├── db/
-│   ├── connection.py    커넥션 풀
-│   └── repository.py    DB 조회 계층 (Mesa 모델은 SQL을 직접 쓰지 않음)
-└── simulation/
-    ├── space.py         GeoJSON 파싱, 위경도 ↔ 로컬 미터 좌표 변환
-    ├── placement.py     구역 폴리곤 내 오브젝트(유동인구) 배치
-    ├── risk.py          위험도 스코어링 (공인 기준 근거)
-    ├── agents.py        VisitorAgent
-    └── model.py         MarketDigitalTwin (Mesa Model)
+│   ├── connection.py       커넥션 풀
+│   ├── repository.py       DB 조회 계층 (Mesa 모델은 SQL을 직접 쓰지 않음)
+│   └── report_adapter.py   ERD 조회 DTO를 보고서 내부 모델로 변환
+├── simulation/
+│   ├── space.py            GeoJSON 파싱, 위경도 ↔ 로컬 미터 좌표 변환
+│   ├── placement.py        구역 폴리곤 내 오브젝트(유동인구) 배치
+│   ├── risk.py             위험도 스코어링 (공인 기준 근거)
+│   ├── agents.py           VisitorAgent
+│   └── model.py            MarketDigitalTwin (Mesa Model)
+└── reporting/
+    ├── analytics.py        기준안과 복수 대안의 지표 변화량 비교
+    ├── charting.py         밀집도·위험도·시간대별 차트 생성
+    ├── evidence.py         OpenAI Embedding 기반 공공문서 RAG 검색
+    ├── narrative.py        LLM 또는 템플릿 기반 보고서 본문 생성
+    ├── docx_renderer.py    수정 가능한 DOCX 정책 보고서 생성
+    └── service.py          검색·분석·서술·차트·문서 생성 순서 조율
 ```
+
+## 보고서 및 RAG 환경설정
+
+보고서 생성에는 다음 환경변수를 사용한다.
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `OPENAI_API_KEY` | 없음 | Embedding 검색 및 LLM 본문 생성에 필요한 API 키 |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | PDF 및 검색 질의 Embedding 모델 |
+| `OPENAI_MODEL` | `gpt-4.1-mini` | 보고서 본문 생성 모델 |
+| `NARRATIVE_MODE` | `template` | `template` 또는 `openai` |
+| `NARRATIVE_STRICT` | `false` | LLM 오류 발생 시 보고서 생성을 중단할지 여부 |
+| `RAG_MIN_VECTOR_SCORE` | `0.35` | 벡터 검색 결과의 최소 유사도 |
+| `REPORT_OUTPUT_DIR` | `outputs` | DOCX와 분석 JSON 저장 위치 |
+| `REPORT_VECTOR_INDEX_PATH` | `knowledge/vector_index.json` | 벡터 인덱스 경로 |
+| `DOCX_FONT_NAME` | `맑은 고딕` | DOCX 본문 한글 글꼴 |
+| `KOREAN_FONT_PATH` | 자동 탐색 | Matplotlib 차트용 한글 글꼴 경로 |
 
 ## 로컬 실행
 
@@ -141,3 +199,50 @@ API 문서: http://localhost:8000/docs
 - `mrkaddr01d` — 구역 (GeoJSON `Polygon`, 좌표 순서는 `[경도, 위도]`)
 - `mrkadjc01m` — 구역 인접 관계 (통로 폭, 거리)
 - `mrkfcts01m` — 출입구 (`facility_type='GATE'`, 위경도)
+
+## RAG 근거 문서 준비
+
+공공문서 PDF 원문과 생성된 벡터 인덱스는 Git에 포함하지 않는다.
+
+필요 문서:
+
+1. 지속가능한 관광지 혼잡도 운영 관리 매뉴얼
+2. 2025 행정업무운영 편람
+3. 쉬운 공문서 쓰기 길잡이
+
+PDF를 다음 경로에 배치한다.
+
+```text
+knowledge/source_docs/
+```
+
+API 키를 설정한 뒤 인덱스를 생성한다.
+```powershell
+python scripts/build_rag_index.py
+```
+생성 결과:
+```text
+knowledge/vector_index.json
+```
+신규 개발 환경과 배포 환경에서는 팀 공유 저장소 또는
+Object Storage를 통해 PDF 또는 벡터 인덱스를 별도로 준비해야 한다.
+
+## 보고서 테스트 방법
+
+OpenAI 호출이 없는 단위·파이프라인 테스트:
+
+```powershell
+python -m pytest tests/reporting -m "not integration" -q
+```
+현재 검증 결과:
+```text
+3 passed, 1 deselected
+```
+OpenAI Vector RAG 통합 테스트:
+```powershell
+python -m pytest tests/reporting -m integration -q
+```
+현재 검증 결과:
+```text
+1 passed, 3 deselected
+```
