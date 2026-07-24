@@ -32,7 +32,8 @@ def fetch_zones(market_id: int) -> list[dict]:
 
 def fetch_adjacency(market_id: int, active_only: bool = True) -> list[dict]:
     sql = (
-        "SELECT adjacency_id, from_zone_id, to_zone_id, path_width, distance_m, is_active "
+        "SELECT adjacency_id, from_zone_id, to_zone_id, path_width, distance_m, "
+        "is_active, path_coordinates "
         "FROM mrkadjc01m WHERE market_id = %s"
     )
     if active_only:
@@ -45,9 +46,27 @@ def fetch_adjacency(market_id: int, active_only: bool = True) -> list[dict]:
 def fetch_gates(market_id: int) -> list[dict]:
     with get_cursor() as cur:
         cur.execute(
-            "SELECT facility_id, name, latitude, longitude "
+            "SELECT facility_id, name, latitude, longitude, weight "
             "FROM mrkfcts01m "
             "WHERE market_id = %s AND facility_type = 'GATE' AND is_active = TRUE",
+            (market_id,),
+        )
+        return cur.fetchall()
+
+
+def fetch_stalls(market_id: int) -> list[dict]:
+    """
+    매력도(attraction)를 만드는 오브젝트(매대/적재물 등).
+    GATE를 제외한 모든 활성 시설을 매대로 취급한다 (BE SpatialLayoutService의
+    "GATE가 아니면 stall" 규칙과 동일).
+    footprint_radius_m: 오브젝트가 실제로 차지하는 반경(m). 없으면 model.py의
+    DEFAULT_FACILITY_RADIUS_M으로 대체됨 (2026-07-24: 장애물 회피 경로 계산용 추가).
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT facility_id, name, latitude, longitude, weight, footprint_radius_m "
+            "FROM mrkfcts01m "
+            "WHERE market_id = %s AND facility_type != 'GATE' AND is_active = TRUE",
             (market_id,),
         )
         return cur.fetchall()

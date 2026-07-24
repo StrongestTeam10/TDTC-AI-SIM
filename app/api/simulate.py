@@ -1,6 +1,7 @@
 """시뮬레이션 엔드포인트."""
 from __future__ import annotations
 
+import random
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -9,11 +10,15 @@ from fastapi import APIRouter, HTTPException
 from app.db import repository as repo
 from app.schemas.models import (
     ContributingFactors,
+    PredictRequest,
+    PredictResult,
     RiskScoreDto,
+    RiskTrendPoint,
     ScenarioRequest,
     ScenarioResult,
     SnapshotRequest,
     SnapshotResponse,
+    ZoneRiskPoint,
 )
 from app.simulation.agents import VisitorState
 from app.simulation.model import (
@@ -45,7 +50,8 @@ def _load_layout(market_id: int) -> MarketLayout:
 
     adjacency = repo.fetch_adjacency(market_id)
     gates = repo.fetch_gates(market_id)
-    return MarketLayout.from_db_rows(market, zones, adjacency, gates)
+    stalls = repo.fetch_stalls(market_id)
+    return MarketLayout.from_db_rows(market, zones, adjacency, gates, stalls)
 
 
 @router.post("/snapshot", response_model=SnapshotResponse)
@@ -172,4 +178,83 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
             level=overall_level,
             contributingFactors=factors,
         ),
+    )
+
+
+def _build_inflow_schedule(total: int, steps: int, seed: int | None) -> list[int]:
+    """총 유입 인원(total)을 steps개 스텝에 무작위로 흩어 배분한다.
+
+    각 스텝에 무작위 가중치를 뽑아 정규화한 뒤 total을 곱해서 배분하므로,
+    스텝마다 인원수가 들쭉날쭉하고 합계는 total에 맞춰진다(반올림 오차로 1~2명
+    차이 가능). total이 0이면 전부 0.
+    """
+    if total <= 0 or steps <= 0:
+        return [0] * steps
+    rng = random.Random(seed)
+    weights = [rng.random() for _ in range(steps)]
+    weight_sum = sum(weights) or 1.0
+    schedule = [round(total * w / weight_sum) for w in weights]
+    return schedule
+
+
+def _risk_trend_point(model: MarketDigitalTwin, step_index: int) -> RiskTrendPoint:
+    zones = [
+        ZoneRiskPoint(zoneId=zid, riskScore=r.score, riskLevel=r.level.value)
+        for zid, r in model.risk.items()
+    ]
+    overall = max((r.score for r in model.risk.values()), default=0.0)
+    return RiskTrendPoint(step=step_index + 1, overallRiskScore=overall, zones=zones)
+
+
+@router.post("/predict", response_model=PredictResult)
+def simulate_predict(req: PredictRequest) -> PredictResult:
+    """
+    파이프라인 A 확장(2026-07-24 추가): 실측 관측값을 초기 상태로 시작해,
+    매대(오브젝트) 매력도 기반 자연스러운 이동과 게이트를 통한 신규 유입을
+    반영하며 steps만큼 진행하는 예측 시뮬레이션.
+
+    /simulate/scenario와의 차이: 화재 등 외부 충격 이벤트(scenarioType)를 다루지
+    않는다. 순수하게 "지금 이 상태에서 사람이 더 몰리면 어떻게 되는가"만 본다.
+    """
+    requested_at = datetime.now(timezone.utc)
+    prediction_id = str(uuid.uuid4())
+
+    layout = _load_layout(req.marketId)
+
+    densities = repo.fetch_crowd_density(req.marketId, req.capturedAt)
+    observations: dict[int, ZoneObservation] = {}
+    for row in densities:
+        zid = row["zone_id"]
+        observations[zid] = ZoneObservation(
+            zone_id=zid,
+            visitor_count=row["visitor_count"] or 0,
+        )
+
+    # 초기 배치는 MIRROR와 동일하게 실측값을 쓰되, mode는 SCENARIO로 켜서
+    # 이후 스텝마다 매대 매력도 기반 이동/대피 로직이 동작하게 한다.
+    model = MarketDigitalTwin(
+        layout, observations, mode=SimulationMode.SCENARIO, seed=req.seed
+    )
+
+    # 총 유입 인원(totalInflow)을 스텝별로 무작위 분산한다. 스텝마다 다른 인원이
+    # 유입되고, 합계는 totalInflow에 맞춰진다(반올림 오차로 1~2명 정도 차이 가능).
+    inflow_schedule = _build_inflow_schedule(req.totalInflow, req.steps, req.seed)
+
+    frames: list[list[dict]] = []
+    risk_trend: list[RiskTrendPoint] = []
+    for step_index in range(req.steps):
+        if inflow_schedule[step_index] > 0:
+            model.inject_inflow(inflow_schedule[step_index])
+        model.step()
+        frames.append(_frame_agents(model))
+        risk_trend.append(_risk_trend_point(model, step_index))
+
+    final_overall = risk_trend[-1].overallRiskScore if risk_trend else 0.0
+
+    return PredictResult(
+        predictionId=prediction_id,
+        requestedAt=requested_at,
+        frames=frames,
+        riskTrend=risk_trend,
+        finalOverallRiskScore=final_overall,
     )
