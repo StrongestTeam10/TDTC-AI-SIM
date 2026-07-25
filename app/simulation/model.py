@@ -17,6 +17,7 @@ from mesa import Model
 from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 
+from app.schemas.models import CorridorPolicy, PlacedObject
 from app.simulation.agents import VisitorAgent
 from app.simulation.gridspace import WalkableGrid
 from app.simulation.placement import (
@@ -79,6 +80,24 @@ class MarketLayout:
     오목한 폴리곤 형태에서도 폴리곤 밖으로 나가지 않고, 매대/푸드트럭 같은
     오브젝트가 있으면 자동으로 회피한다 (2026-07-24 도입)."""
     gates: list[dict] = field(default_factory=list)
+    blocked_directions: set[tuple[int, int]] = field(default_factory=set)
+    """2026-07-25 추가: 시나리오의 일방통행(one_way) 통로 정책으로 막힌 방향.
+    (from_zone_id, to_zone_id) 쌍이 여기 있으면 그 방향으로는 이동하지 않는다."""
+
+    # walkable_grid를 오브젝트 배치 반영해서 다시 만들 때 필요한 재료.
+    # from_db_rows()에서 채워지고, apply_scenario_overrides()가 재사용한다.
+    _walkable_area: object = field(default=None, repr=False)
+    _base_obstacles: list[tuple[float, float, float]] = field(default_factory=list, repr=False)
+    _preferred_lines: list[list[tuple[float, float]]] = field(default_factory=list, repr=False)
+
+    def allowed_neighbors(self, zone_id: int) -> list[int]:
+        """일방통행으로 막힌 방향을 제외한 인접 구역 목록."""
+        if zone_id not in self.graph:
+            return []
+        return [
+            n for n in self.graph.neighbors(zone_id)
+            if (zone_id, n) not in self.blocked_directions
+        ]
 
     @classmethod
     def from_db_rows(
@@ -205,7 +224,7 @@ class MarketLayout:
             preferred_lines=preferred_lines,
         )
 
-        return cls(
+        layout = cls(
             market_id=market_row["market_id"],
             market_name=market_row["market_name"],
             projection=projection,
@@ -214,6 +233,98 @@ class MarketLayout:
             walkable_grid=walkable_grid,
             gates=gates,
         )
+        # 2026-07-25: 시나리오 오브젝트 배치 시 격자를 다시 만들 수 있도록 재료 보관.
+        layout._walkable_area = walkable_area
+        layout._base_obstacles = obstacles
+        layout._preferred_lines = preferred_lines
+        return layout
+
+
+FOOD_TRUCK_ATTRACTION = 6.0
+"""푸드트럭 오브젝트가 구역 매력도에 더하는 최대 가중치(intensity=1.0일 때)."""
+
+EVENT_ZONE_ATTRACTION = 9.0
+"""행사존 오브젝트가 구역 매력도에 더하는 최대 가중치. 푸드트럭보다 쏠림 효과가 크다."""
+
+REST_AREA_ATTRACTION = 2.5
+"""휴게 공간 오브젝트가 구역 매력도에 더하는 최대 가중치. 완만한 쏠림."""
+
+OBSTACLE_BASE_RADIUS_M = 1.5
+"""장애물(obstacle) 오브젝트의 최소 점유 반경(m). intensity가 클수록 반경이 커진다."""
+
+
+def apply_scenario_overrides(
+    layout: MarketLayout,
+    objects: list[PlacedObject],
+    corridor_policies: list[CorridorPolicy],
+) -> None:
+    """
+    시나리오 요청의 오브젝트 배치·통로 정책을 이번 요청 한 번에만 레이아웃에 반영한다.
+
+    2026-07-25 추가. layout은 _load_layout()이 매 요청마다 새로 만든 인스턴스이므로,
+    여기서의 변경(그래프 편집, attraction 조정, 격자 재구성)은 DB에 저장되지 않고
+    이 시뮬레이션 실행에만 영향을 준다.
+
+    좌표 정밀도 한계: PlacedObject는 zoneId 단위로만 지정되므로, 해당 구역
+    폴리곤의 대표점(representative_point)에 위치한 것으로 근사한다. 실좌표
+    배치가 필요해지면 PlacedObject에 위경도 필드를 추가하고 이 함수만 손보면 된다.
+    """
+    extra_obstacles: list[tuple[float, float, float]] = []
+
+    for obj in objects:
+        spec = layout.zones.get(obj.zoneId)
+        if spec is None:
+            continue  # 존재하지 않는 구역 - 조용히 무시(요청 검증은 API 레이어 책임)
+
+        if obj.objectType == "food_truck":
+            spec.attraction += FOOD_TRUCK_ATTRACTION * obj.intensity
+        elif obj.objectType == "event_zone":
+            spec.attraction += EVENT_ZONE_ATTRACTION * obj.intensity
+        elif obj.objectType == "rest_area":
+            spec.attraction += REST_AREA_ATTRACTION * obj.intensity
+        elif obj.objectType == "obstacle":
+            # 장애물은 매력도를 낮추고(사람들이 자연스레 피함) + 실제로 그 자리를
+            # 걸을 수 없게 walkable_grid에 원형 장애물로 추가한다.
+            point = spec.polygon_local.representative_point()
+            radius = OBSTACLE_BASE_RADIUS_M * (0.5 + obj.intensity)
+            extra_obstacles.append((point.x, point.y, radius))
+            spec.attraction = max(0.0, spec.attraction - EVENT_ZONE_ATTRACTION * obj.intensity * 0.3)
+
+    if extra_obstacles:
+        # 오브젝트가 있으면 걷기 격자를 오브젝트 반영해서 재구성한다.
+        # (기존 매대 장애물 + 이번 시나리오 오브젝트를 합쳐서 다시 빌드)
+        layout.walkable_grid = WalkableGrid.build(
+            walkable_area=layout._walkable_area,
+            obstacles=[*layout._base_obstacles, *extra_obstacles],
+            preferred_lines=layout._preferred_lines,
+        )
+
+    for policy in corridor_policies:
+        a, b = policy.fromZoneId, policy.toZoneId
+        if a not in layout.zones or b not in layout.zones:
+            continue  # 존재하지 않는 구역 쌍 - 조용히 무시
+
+        if policy.action == "close":
+            if layout.graph.has_edge(a, b):
+                layout.graph.remove_edge(a, b)
+            layout.blocked_directions.discard((a, b))
+            layout.blocked_directions.discard((b, a))
+        elif policy.action == "open":
+            # DB 인접 데이터에 없던 통로도 "새로 뚫는" what-if를 표현할 수 있게 허용.
+            if not layout.graph.has_edge(a, b):
+                layout.graph.add_edge(a, b, weight=1.0, path_width=1.0)
+            layout.blocked_directions.discard((a, b))
+            layout.blocked_directions.discard((b, a))
+        elif policy.action == "one_way":
+            if not layout.graph.has_edge(a, b):
+                layout.graph.add_edge(a, b, weight=1.0, path_width=1.0)
+            # allowedDirection="from_to"면 a->b만 허용 == b->a를 막는다. 기본값도 from_to로 취급.
+            if policy.allowedDirection == "to_from":
+                layout.blocked_directions.discard((b, a))
+                layout.blocked_directions.add((a, b))
+            else:
+                layout.blocked_directions.discard((a, b))
+                layout.blocked_directions.add((b, a))
 
 
 class MarketDigitalTwin(Model):
@@ -320,7 +431,7 @@ class MarketDigitalTwin(Model):
         current_hops = self._exit_hops.get(zone_id)
         if current_hops is None or current_hops == 0:
             return zone_id
-        for neighbor in self.layout.graph.neighbors(zone_id):
+        for neighbor in self.layout.allowed_neighbors(zone_id):
             if self._exit_hops.get(neighbor, 99) < current_hops:
                 return neighbor
         return zone_id
@@ -333,6 +444,14 @@ class MarketDigitalTwin(Model):
         실제로는 정의돼 있지 않던 버그를 수정하며 추가함.
         """
         return self.layout.graph
+
+    def neighbors_of(self, zone_id: int) -> list[int]:
+        """정상 보행 중인 에이전트가 다음 목적지로 고려할 인접 구역.
+
+        2026-07-25: 통로 폐쇄/일방통행 시나리오 정책이 반영되도록
+        layout.graph.neighbors() 직접 호출 대신 이 메서드를 통해서만 접근한다.
+        """
+        return self.layout.allowed_neighbors(zone_id)
 
     def attraction_of(self, zone_id: int) -> float:
         """해당 구역에 배치된 매대(오브젝트)들의 weight 합.

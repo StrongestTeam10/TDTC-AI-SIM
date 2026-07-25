@@ -121,7 +121,7 @@ class VisitorAgent(Agent):
 
         current_attraction = self.model.attraction_of(self.zone_id)
         best_zone, best_attraction = self.zone_id, current_attraction
-        for neighbor in self.model.movement_graph.neighbors(self.zone_id):
+        for neighbor in self.model.neighbors_of(self.zone_id):
             a = self.model.attraction_of(neighbor)
             if a > best_attraction:
                 best_zone, best_attraction = neighbor, a

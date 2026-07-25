@@ -21,6 +21,30 @@ class SnapshotRequest(BaseModel):
     )
 
 
+class PlacedObject(BaseModel):
+    """
+    사용자가 지도(구역) 위에 배치한 오브젝트 하나. BE PlacedObjectDto와 1:1 매칭.
+
+    2026-07-25 추가: 정밀 좌표 데이터가 없으므로 zoneId 단위로 배치하고,
+    해당 구역의 대표점(polygon.representative_point())에 물리적 효과를 준다.
+    """
+
+    objectType: str = Field(..., description="food_truck | obstacle | event_zone | rest_area")
+    zoneId: int
+    intensity: float = Field(0.5, ge=0.0, le=1.0)
+
+
+class CorridorPolicy(BaseModel):
+    """구역 간 통로에 대한 정책. BE CorridorPolicyDto와 1:1 매칭."""
+
+    fromZoneId: int
+    toZoneId: int
+    action: str = Field(..., description="close | open | one_way")
+    allowedDirection: str | None = Field(
+        None, description="one_way일 때만 사용. from_to | to_from"
+    )
+
+
 class ScenarioRequest(BaseModel):
     """파이프라인 B: 사용자 지정 시나리오 요청."""
 
@@ -30,6 +54,8 @@ class ScenarioRequest(BaseModel):
     eventZoneId: int | None = None
     eventIntensity: float = Field(0.5, ge=0.0, le=1.0)
     steps: int = Field(50, ge=1, le=1000)
+    objects: list[PlacedObject] = Field(default_factory=list)
+    corridorPolicies: list[CorridorPolicy] = Field(default_factory=list)
 
 
 class RiskBreakdown(BaseModel):

@@ -26,6 +26,7 @@ from app.simulation.model import (
     MarketLayout,
     SimulationMode,
     ZoneObservation,
+    apply_scenario_overrides,
 )
 from app.simulation.risk import score_to_level
 
@@ -120,6 +121,10 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     scenario_id = str(uuid.uuid4())
 
     layout = _load_layout(req.marketId)
+
+    # 2026-07-25 추가: 오브젝트 배치(푸드트럭/장애물/행사존/휴게공간)와 통로 정책
+    # (폐쇄/개방/일방통행)을 이번 요청에만 반영한다. DB에는 저장되지 않는다.
+    apply_scenario_overrides(layout, req.objects, req.corridorPolicies)
 
     zone_ids = list(layout.zones.keys())
     if not zone_ids:
