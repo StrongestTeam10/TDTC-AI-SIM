@@ -103,11 +103,17 @@ def place_visitors(
     poly_local: Polygon,
     visitor_count: int,
     strategy: PlacementStrategy = PlacementStrategy.CENTERLINE,
-    centerline_strength: float = 0.5,
+    centerline_strength: float = 0.18,
     seed: int | None = None,
 ) -> list[tuple[float, float]]:
     """
     구역 폴리곤(로컬 미터 좌표) 내부에 visitor_count 명을 배치한다.
+
+    2026-07-25: centerline_strength 기본값을 0.5 -> 0.18로 낮췄다. 좁고 긴 골목형
+    구역에서 0.5는 사실상 모든 사람을 거의 같은 선 위로 몰아넣어, 화면상 "한 줄로
+    줄지어 걷는" 것처럼 보이는 부작용이 있었다. 0.18은 통로 중앙 선호 경향은
+    유지하면서도 좌우로 자연스럽게 퍼지도록 완화한 값이다(임의 튜닝값, 실측
+    보정 필요).
 
     Returns:
         (x, y) 로컬 미터 좌표 리스트.
