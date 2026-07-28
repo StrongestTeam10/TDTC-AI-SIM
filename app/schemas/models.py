@@ -21,15 +21,65 @@ class SnapshotRequest(BaseModel):
     )
 
 
+class PlacedObject(BaseModel):
+    """
+    사용자가 지도(구역) 위에 배치한 오브젝트 하나. BE PlacedObjectDto와 1:1 매칭.
+
+    2026-07-25 추가: 정밀 좌표 데이터가 없으므로 zoneId 단위로 배치하고,
+    해당 구역의 대표점(polygon.representative_point())에 물리적 효과를 준다.
+    """
+
+    objectType: str = Field(..., description="food_truck | obstacle | event_zone | rest_area")
+    zoneId: int
+    intensity: float = Field(0.5, ge=0.0, le=1.0)
+    latitude: float | None = Field(None, description="지도에서 정밀 배치 시 위도")
+    longitude: float | None = Field(None, description="지도에서 정밀 배치 시 경도")
+
+
+class CorridorPolicy(BaseModel):
+    """구역 간 통로에 대한 정책. BE CorridorPolicyDto와 1:1 매칭."""
+
+    fromZoneId: int
+    toZoneId: int
+    action: str = Field(..., description="close | open | one_way")
+    allowedDirection: str | None = Field(
+        None, description="one_way일 때만 사용. from_to | to_from"
+    )
+
+
+class EventTrigger(BaseModel):
+    """
+    2026-07-25 추가: 화재/음향 이상 이벤트를 지도 클릭으로 배치. BE EventTriggerDto와 1:1 매칭.
+
+    fire: 해당 구역의 위험도를 강제로 끌어올려(75 + 25*intensity) 그 구역 사람들이
+        계속 대피 상태를 유지하게 한다(지속 효과).
+    acoustic_anomaly: 발생 지점 반경(5 + 15*intensity m) 안의 사람들을 그 순간
+        한 번만 강제로 대피시킨다(즉발성, 밀집도와 무관).
+    """
+
+    eventType: str = Field(..., description="fire | acoustic_anomaly")
+    zoneId: int
+    intensity: float = Field(0.5, ge=0.0, le=1.0)
+    latitude: float | None = Field(None, description="지도에서 정밀 배치 시 위도")
+    longitude: float | None = Field(None, description="지도에서 정밀 배치 시 경도")
+
+
 class ScenarioRequest(BaseModel):
-    """파이프라인 B: 사용자 지정 시나리오 요청."""
+    """파이프라인 B: 사용자 지정 시나리오 요청.
+
+    2026-07-25: scenarioType/eventZoneId/eventIntensity를 삭제하고 events로 대체했다.
+    예전 필드들은 프론트에 입력창만 있었을 뿐 실제로는 어디서도 읽히지 않는
+    죽은 필드였다(화재/음향 이벤트가 구현되지 않았었음). 이제 오브젝트 배치와
+    같은 방식(지도 클릭 -> zoneId + 위경도 + intensity)으로 실제 효과를 낸다.
+    """
 
     marketId: int
     agentCount: int = Field(..., ge=1, le=100_000)
-    scenarioType: str = Field("none", description="none | fire | acoustic_anomaly | corridor_block")
-    eventZoneId: int | None = None
-    eventIntensity: float = Field(0.5, ge=0.0, le=1.0)
     steps: int = Field(50, ge=1, le=1000)
+    objects: list[PlacedObject] = Field(default_factory=list)
+    corridorPolicies: list[CorridorPolicy] = Field(default_factory=list)
+    events: list[EventTrigger] = Field(default_factory=list)
+    closedGateIds: list[int] = Field(default_factory=list)
 
 
 class RiskBreakdown(BaseModel):
@@ -103,6 +153,9 @@ class ScenarioResult(BaseModel):
     evacuationTimeSeconds: 위험으로 대피를 시작한 에이전트 전원이 출구 구역에
         도달하는 데 걸린 시간. 대피가 발생하지 않았거나 요청한 steps 내에
         완료되지 못하면 None.
+    averageDensity/maxDensity: 2026-07-27 추가. 시뮬레이션 마지막 스텝 기준
+        구역별 밀집도(명/m^2)의 평균/최댓값. BE가 simrslt01d(predicted_density,
+        predicted_max_density)에 그대로 저장하는 용도.
     """
 
     scenarioId: str
@@ -110,6 +163,8 @@ class ScenarioResult(BaseModel):
     frames: list[list[AgentState]]
     evacuationTimeSeconds: int | None
     finalRiskScore: RiskScoreDto
+    averageDensity: float
+    maxDensity: float
 
 
 class PredictRequest(BaseModel):

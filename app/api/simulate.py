@@ -26,14 +26,12 @@ from app.simulation.model import (
     MarketLayout,
     SimulationMode,
     ZoneObservation,
+    apply_event_triggers,
+    apply_gate_closures,
+    apply_scenario_overrides,
 )
 from app.simulation.risk import score_to_level
 
-# 시나리오 시뮬레이션의 1 step이 실제 몇 초에 해당하는지에 대한 가정값.
-# 현재 이동 모델(VisitorAgent._move_toward_exit)은 거리와 무관하게 매 스텝마다
-# 인접 구역 1칸을 이동하므로, 실측 보행 속도에 기반한 정확한 환산이 아니라
-# 대피소요시간을 대략적으로 가늠하기 위한 임시 캘리브레이션 값이다.
-# 추후 구역 간 실제 거리(mrkadjc01m.distance_m)와 평균 보행속도를 반영해 재산정 필요.
 STEP_DURATION_SECONDS = 10
 
 router = APIRouter(prefix="/simulate", tags=["simulate"])
@@ -56,13 +54,6 @@ def _load_layout(market_id: int) -> MarketLayout:
 
 @router.post("/snapshot", response_model=SnapshotResponse)
 def simulate_snapshot(req: SnapshotRequest) -> SnapshotResponse:
-    """
-    파이프라인 A: 센서 실측값을 로드해 오브젝트를 배치하고 위험도를 산출한다.
-
-    CCTV(인구 밀집도)만 반영한다. 레이더(이동 속도)/음향(이상 이벤트)은
-    2026-07-23부로 완전히 제거되었다 (관련 테이블·리포지토리 함수·위험도
-    가중치 항목까지 전부 삭제).
-    """
     layout = _load_layout(req.marketId)
 
     densities = repo.fetch_crowd_density(req.marketId, req.capturedAt)
@@ -89,7 +80,6 @@ def simulate_snapshot(req: SnapshotRequest) -> SnapshotResponse:
 
 
 def _frame_agents(model: MarketDigitalTwin) -> list[dict]:
-    """현재 스텝의 에이전트 상태를 AgentState 스키마 형태(dict)로 직렬화."""
     projection = model.layout.projection
     frame = []
     for agent in model.agents:
@@ -109,23 +99,25 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     """
     파이프라인 B: 사용자 지정 What-if 시나리오.
 
-    레이아웃 로드 → 초기 배치 → steps만큼 진행하며 매 스텝의 에이전트 상태를
-    frames로 누적하고, 대피 완료 시점과 최종 위험도를 산출해 반환한다.
-
-    주의: eventZoneId/eventIntensity/scenarioType으로 지정하는 화재/음향전파 등
-    "외부 충격 이벤트"는 아직 구현되어 있지 않다. 현재는 밀집도 기반 위험도가
-    임계치를 넘으면 에이전트가 자발적으로 대피를 시작하는 기본 이동 모델만 동작한다.
+    2026-07-25: 대피 완료 판정 로직 변경. 예전엔 "대피 중인 사람이 전부
+    출구 구역에 도착했다"만 확인했는데(실제 퇴장 동작이 없었음), 이제는
+    사람이 게이트를 통과해 실제로 제거(퇴장)되므로, "한 번이라도 대피가
+    시작됐고(ever_evacuating) 지금은 대피 중인 사람이 하나도 안 남았다"를
+    기준으로 삼는다. 게이트가 다 닫혀 대피가 막히면 이 조건이 영영 안
+    채워지고, 응답의 evacuationTimeSeconds는 None(대피 미완료)으로 남는다.
     """
     requested_at = datetime.now(timezone.utc)
     scenario_id = str(uuid.uuid4())
 
     layout = _load_layout(req.marketId)
 
+    apply_scenario_overrides(layout, req.objects, req.corridorPolicies)
+    apply_gate_closures(layout, set(req.closedGateIds))
+
     zone_ids = list(layout.zones.keys())
     if not zone_ids:
         raise HTTPException(status_code=400, detail="구역 데이터가 없습니다")
 
-    # 면적 비례로 초기 인원 배분
     total_area = sum(z.area_m2 for z in layout.zones.values())
     observations = {
         zid: ZoneObservation(
@@ -136,7 +128,10 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     }
 
     model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=42)
-    exit_zone_ids = {zid for zid, spec in layout.zones.items() if spec.is_exit_zone}
+
+    # 2026-07-25 추가: 화재/음향 이상 이벤트 반영. 에이전트가 스폰된 뒤(model 생성 후)
+    # 호출해야 음향 이상의 반경 판정이 실제 좌표 기준으로 정확히 이뤄진다.
+    apply_event_triggers(model, req.events)
 
     frames: list[list[dict]] = []
     evacuation_seconds: int | None = None
@@ -144,13 +139,11 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
         model.step()
         frames.append(_frame_agents(model))
 
-        if evacuation_seconds is None:
-            evacuating = [a for a in model.agents if a.state is VisitorState.EVACUATING]
-            if evacuating and all(a.zone_id in exit_zone_ids for a in evacuating):
+        if evacuation_seconds is None and model.ever_evacuating:
+            still_evacuating = any(a.state is VisitorState.EVACUATING for a in model.agents)
+            if not still_evacuating:
                 evacuation_seconds = (step_index + 1) * STEP_DURATION_SECONDS
 
-    # 최종 위험도: 구역 중 가장 높은 점수를 종합 위험도로 삼는다 (snapshot()의 overallRiskScore와 동일 기준).
-    # contributingFactors는 그 최고 위험 구역의 세부 지표를 그대로 사용한다.
     risk_by_zone = model.risk
     if risk_by_zone:
         top = max(risk_by_zone.values(), key=lambda r: r.score)
@@ -160,10 +153,17 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
             density=top.density_score,
             bottleneck=top.bottleneck_score,
         )
+        # 2026-07-27 추가: 마지막 스텝 기준 구역별 밀집도(명/m^2)의 평균/최댓값.
+        # BE가 simrslt01d(predicted_density/predicted_max_density)에 그대로 적재한다.
+        densities = [r.density for r in risk_by_zone.values()]
+        average_density = sum(densities) / len(densities)
+        max_density = max(densities)
     else:
         overall_score = 0.0
         overall_level = score_to_level(0.0).value
         factors = ContributingFactors(density=0.0, bottleneck=0.0)
+        average_density = 0.0
+        max_density = 0.0
 
     final_timestamp = requested_at + timedelta(seconds=req.steps * STEP_DURATION_SECONDS)
 
@@ -178,16 +178,12 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
             level=overall_level,
             contributingFactors=factors,
         ),
+        averageDensity=average_density,
+        maxDensity=max_density,
     )
 
 
 def _build_inflow_schedule(total: int, steps: int, seed: int | None) -> list[int]:
-    """총 유입 인원(total)을 steps개 스텝에 무작위로 흩어 배분한다.
-
-    각 스텝에 무작위 가중치를 뽑아 정규화한 뒤 total을 곱해서 배분하므로,
-    스텝마다 인원수가 들쭉날쭉하고 합계는 total에 맞춰진다(반올림 오차로 1~2명
-    차이 가능). total이 0이면 전부 0.
-    """
     if total <= 0 or steps <= 0:
         return [0] * steps
     rng = random.Random(seed)
@@ -208,14 +204,6 @@ def _risk_trend_point(model: MarketDigitalTwin, step_index: int) -> RiskTrendPoi
 
 @router.post("/predict", response_model=PredictResult)
 def simulate_predict(req: PredictRequest) -> PredictResult:
-    """
-    파이프라인 A 확장(2026-07-24 추가): 실측 관측값을 초기 상태로 시작해,
-    매대(오브젝트) 매력도 기반 자연스러운 이동과 게이트를 통한 신규 유입을
-    반영하며 steps만큼 진행하는 예측 시뮬레이션.
-
-    /simulate/scenario와의 차이: 화재 등 외부 충격 이벤트(scenarioType)를 다루지
-    않는다. 순수하게 "지금 이 상태에서 사람이 더 몰리면 어떻게 되는가"만 본다.
-    """
     requested_at = datetime.now(timezone.utc)
     prediction_id = str(uuid.uuid4())
 
@@ -230,14 +218,10 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
             visitor_count=row["visitor_count"] or 0,
         )
 
-    # 초기 배치는 MIRROR와 동일하게 실측값을 쓰되, mode는 SCENARIO로 켜서
-    # 이후 스텝마다 매대 매력도 기반 이동/대피 로직이 동작하게 한다.
     model = MarketDigitalTwin(
         layout, observations, mode=SimulationMode.SCENARIO, seed=req.seed
     )
 
-    # 총 유입 인원(totalInflow)을 스텝별로 무작위 분산한다. 스텝마다 다른 인원이
-    # 유입되고, 합계는 totalInflow에 맞춰진다(반올림 오차로 1~2명 정도 차이 가능).
     inflow_schedule = _build_inflow_schedule(req.totalInflow, req.steps, req.seed)
 
     frames: list[list[dict]] = []
