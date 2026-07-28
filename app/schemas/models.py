@@ -111,6 +111,16 @@ class AgentState(BaseModel):
     latitude: float
     longitude: float
     state: str
+    agentType: str = "PASS_THROUGH"
+    actionState: str = "MOVING"
+
+class PoiState(BaseModel):
+    name: str
+    zoneId: int
+    x: float
+    y: float
+    latitude: float
+    longitude: float
 
 
 class SnapshotResponse(BaseModel):
@@ -121,6 +131,7 @@ class SnapshotResponse(BaseModel):
     overallRiskScore: float
     zones: list[ZoneResult]
     agents: list[AgentState] = []
+    pois: list[PoiState] = []
     persistedRiskRows: int = 0
 
 
@@ -161,6 +172,7 @@ class ScenarioResult(BaseModel):
     scenarioId: str
     requestedAt: datetime
     frames: list[list[AgentState]]
+    pois: list[PoiState] = []
     evacuationTimeSeconds: int | None
     finalRiskScore: RiskScoreDto
     averageDensity: float
@@ -212,5 +224,7 @@ class PredictResult(BaseModel):
     predictionId: str
     requestedAt: datetime
     frames: list[list[AgentState]]
+    pois: list[PoiState] = []
     riskTrend: list[RiskTrendPoint]
     finalOverallRiskScore: float
+
