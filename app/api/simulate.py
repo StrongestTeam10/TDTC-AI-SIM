@@ -153,10 +153,17 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
             density=top.density_score,
             bottleneck=top.bottleneck_score,
         )
+        # 2026-07-27 추가: 마지막 스텝 기준 구역별 밀집도(명/m^2)의 평균/최댓값.
+        # BE가 simrslt01d(predicted_density/predicted_max_density)에 그대로 적재한다.
+        densities = [r.density for r in risk_by_zone.values()]
+        average_density = sum(densities) / len(densities)
+        max_density = max(densities)
     else:
         overall_score = 0.0
         overall_level = score_to_level(0.0).value
         factors = ContributingFactors(density=0.0, bottleneck=0.0)
+        average_density = 0.0
+        max_density = 0.0
 
     final_timestamp = requested_at + timedelta(seconds=req.steps * STEP_DURATION_SECONDS)
 
@@ -171,6 +178,8 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
             level=overall_level,
             contributingFactors=factors,
         ),
+        averageDensity=average_density,
+        maxDensity=max_density,
     )
 
 

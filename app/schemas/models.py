@@ -153,6 +153,9 @@ class ScenarioResult(BaseModel):
     evacuationTimeSeconds: 위험으로 대피를 시작한 에이전트 전원이 출구 구역에
         도달하는 데 걸린 시간. 대피가 발생하지 않았거나 요청한 steps 내에
         완료되지 못하면 None.
+    averageDensity/maxDensity: 2026-07-27 추가. 시뮬레이션 마지막 스텝 기준
+        구역별 밀집도(명/m^2)의 평균/최댓값. BE가 simrslt01d(predicted_density,
+        predicted_max_density)에 그대로 저장하는 용도.
     """
 
     scenarioId: str
@@ -160,6 +163,8 @@ class ScenarioResult(BaseModel):
     frames: list[list[AgentState]]
     evacuationTimeSeconds: int | None
     finalRiskScore: RiskScoreDto
+    averageDensity: float
+    maxDensity: float
 
 
 class PredictRequest(BaseModel):
