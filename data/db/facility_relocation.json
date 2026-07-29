@@ -7,7 +7,7 @@
   },
   "change_id": 73001,
   "market": {
-    "market_id": "MKT-001",
+    "market_id": 1,
     "market_name": "망원시장",
     "latitude": null,
     "longitude": null
@@ -17,7 +17,7 @@
       "scenario_id": 130001,
       "change_id": 73001,
       "scenario_name": "현행 시설 배치",
-      "market_id": "MKT-001",
+      "market_id": 1,
       "virtual_config": {
         "is_baseline": true,
         "simulation_context": {
@@ -50,7 +50,7 @@
       "scenario_id": 130002,
       "change_id": 73001,
       "scenario_name": "대안 A: 휴게공간 분산 배치",
-      "market_id": "MKT-001",
+      "market_id": 1,
       "virtual_config": {
         "is_baseline": false,
         "simulation_context": {
@@ -102,7 +102,7 @@
       "scenario_id": 130003,
       "change_id": 73001,
       "scenario_name": "대안 B: 보행약자 우선 재배치",
-      "market_id": "MKT-001",
+      "market_id": 1,
       "virtual_config": {
         "is_baseline": false,
         "simulation_context": {
