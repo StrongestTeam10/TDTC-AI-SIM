@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -16,6 +17,8 @@ from docx.shared import Cm, Pt
 from .narrative import EvidenceNote, Narrative
 from app.schemas.report_models import EvidenceItem, ReportRequest
 
+# 한국 기준 시각으로 표시하기 위해 표기 시점에 KST로 변환한다.
+KST = timezone(timedelta(hours=9))
 
 class DocxReportRenderer:
     def __init__(self) -> None:
@@ -196,32 +199,51 @@ class DocxReportRenderer:
         self._add_heading(document, "1. 검토 결과 요약", 1)
         document.add_paragraph(narrative.executive_summary)
 
+    @staticmethod
+    def _format_period(context) -> str:
+        """검토 개요에 넣을 시뮬레이션 기간 문자열을 만든다."""
+
+        def to_kst(value):
+            return value.astimezone(KST) if value.tzinfo else value
+
+        start = to_kst(context.simulation_start)
+        end = to_kst(context.simulation_end)
+
+        if start == end:
+            return start.strftime("%Y-%m-%d %H:%M")
+        if start.date() == end.date():
+            return (
+                f"{start.strftime('%Y-%m-%d %H:%M')} ~ "
+                f"{end.strftime('%H:%M')}"
+            )
+        return (
+            f"{start.strftime('%Y-%m-%d %H:%M')} ~ "
+            f"{end.strftime('%Y-%m-%d %H:%M')}"
+        )
+
     def _overview(self, document: Document, request: ReportRequest) -> None:
         self._add_heading(document, "2. 검토 개요", 1)
         table = document.add_table(rows=0, cols=2)
         table.style = "Table Grid"
+
+        # 시작·종료가 같으면 "기간"이 아니라 한 시점이므로 라벨도 바꿔 단다.
+        is_single_point = (
+            request.context.simulation_start
+            == request.context.simulation_end
+        )
+        period_label = (
+            "시뮬레이션 기준 시점"
+            if is_single_point
+            else "시뮬레이션 기간"
+        )
+
         items = [
             ("대상 시장", request.market.market_name),
-            (
-                "시뮬레이션 기간",
-                f"{request.context.simulation_start} ~ "
-                f"{request.context.simulation_end}",
-            ),
+            (period_label, self._format_period(request.context)),
             ("예상 방문객", f"{request.context.expected_visitors:,}명"),
             ("모델 버전", request.context.model_version or "미입력"),
         ]
-        if (
-            request.market.latitude is not None
-            and request.market.longitude is not None
-        ):
-            items.insert(
-                1,
-                (
-                    "시장 위치",
-                    f"{request.market.latitude}, "
-                    f"{request.market.longitude}",
-                ),
-            )
+
         for label, value in items:
             cells = table.add_row().cells
             self._set_cell_text(cells[0], label, True)
