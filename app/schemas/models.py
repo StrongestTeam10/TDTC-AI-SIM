@@ -55,6 +55,9 @@ class EventTrigger(BaseModel):
         계속 대피 상태를 유지하게 한다(지속 효과).
     acoustic_anomaly: 발생 지점 반경(5 + 15*intensity m) 안의 사람들을 그 순간
         한 번만 강제로 대피시킨다(즉발성, 밀집도와 무관).
+
+    2026-07-29 추가: triggerStep. 이 이벤트가 실제로 발동하는 스텝 번호(1부터
+    시작). 기본값 1이면 예전처럼 시뮬레이션 시작 시점에 바로 발동한다.
     """
 
     eventType: str = Field(..., description="fire | acoustic_anomaly")
@@ -62,7 +65,7 @@ class EventTrigger(BaseModel):
     intensity: float = Field(0.5, ge=0.0, le=1.0)
     latitude: float | None = Field(None, description="지도에서 정밀 배치 시 위도")
     longitude: float | None = Field(None, description="지도에서 정밀 배치 시 경도")
-
+    triggerStep: int = Field(1, ge=1, description="이 이벤트가 발동하는 스텝 번호(1부터 시작)")
 
 class ScenarioRequest(BaseModel):
     """파이프라인 B: 사용자 지정 시나리오 요청.
@@ -167,6 +170,12 @@ class ScenarioResult(BaseModel):
     averageDensity/maxDensity: 2026-07-27 추가. 시뮬레이션 마지막 스텝 기준
         구역별 밀집도(명/m^2)의 평균/최댓값. BE가 simrslt01d(predicted_density,
         predicted_max_density)에 그대로 저장하는 용도.
+    maxDensityZoneId/maxDensityZoneName: 2026-07-27 추가. 최대 밀집도가 발생한
+        구역. 보고서에 "중앙통로에서 최대 6.8명/㎡" 같은 문장을 쓰려면 숫자만으론
+        부족해서 추가함.
+    evacuatedCount: 2026-07-27 추가. 시뮬레이션 중 실제로 대피 상태(EVACUATING)가
+        됐던 에이전트 수(현재 대피 중이거나 이미 게이트로 퇴장 완료한 인원 포함).
+        정책 효과를 "위험 인원이 N명 줄었다"처럼 서술하는 데 쓰인다.
     """
 
     scenarioId: str
@@ -177,6 +186,9 @@ class ScenarioResult(BaseModel):
     finalRiskScore: RiskScoreDto
     averageDensity: float
     maxDensity: float
+    maxDensityZoneId: int | None = None
+    maxDensityZoneName: str | None = None
+    evacuatedCount: int = 0
 
 
 class PredictRequest(BaseModel):

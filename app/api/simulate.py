@@ -129,13 +129,18 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
 
     model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=42)
 
-    # 2026-07-25 추가: 화재/음향 이상 이벤트 반영. 에이전트가 스폰된 뒤(model 생성 후)
-    # 호출해야 음향 이상의 반경 판정이 실제 좌표 기준으로 정확히 이뤄진다.
-    apply_event_triggers(model, req.events)
-
     frames: list[list[dict]] = []
     evacuation_seconds: int | None = None
     for step_index in range(req.steps):
+        # 2026-07-29 추가: 이벤트가 "시작하자마자 전부 발동"하는 대신, 각자
+        # 지정된 triggerStep이 됐을 때만 발동하도록 스텝 루프 안에서 적용한다.
+        # model.step() 호출 전에 적용해서, triggerStep=1(기본값)이면 예전처럼
+        # 첫 스텝의 이동 판단에서부터 반영되게 한다.
+        current_step_number = step_index + 1
+        due_events = [e for e in req.events if e.triggerStep == current_step_number]
+        if due_events:
+            apply_event_triggers(model, due_events)
+
         model.step()
         frames.append(_frame_agents(model))
 
@@ -153,17 +158,24 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
             density=top.density_score,
             bottleneck=top.bottleneck_score,
         )
-        # 2026-07-27 추가: 마지막 스텝 기준 구역별 밀집도(명/m^2)의 평균/최댓값.
-        # BE가 simrslt01d(predicted_density/predicted_max_density)에 그대로 적재한다.
+        # 2026-07-27 추가: 마지막 스텝 기준 구역별 밀집도(명/m^2)의 평균/최댓값과,
+        # 그 최댓값이 발생한 구역. BE가 simrslt01d에 그대로 적재하고, 보고서에서
+        # "중앙통로에서 최대 X명/m^2" 같은 문장을 만드는 데 쓴다.
         densities = [r.density for r in risk_by_zone.values()]
         average_density = sum(densities) / len(densities)
-        max_density = max(densities)
+        max_density_zone_id, max_density_assessment = max(
+            risk_by_zone.items(), key=lambda item: item[1].density
+        )
+        max_density = max_density_assessment.density
+        max_density_zone_name = layout.zones[max_density_zone_id].zone_name
     else:
         overall_score = 0.0
         overall_level = score_to_level(0.0).value
         factors = ContributingFactors(density=0.0, bottleneck=0.0)
         average_density = 0.0
         max_density = 0.0
+        max_density_zone_id = None
+        max_density_zone_name = None
 
     final_timestamp = requested_at + timedelta(seconds=req.steps * STEP_DURATION_SECONDS)
 
@@ -180,6 +192,9 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
         ),
         averageDensity=average_density,
         maxDensity=max_density,
+        maxDensityZoneId=max_density_zone_id,
+        maxDensityZoneName=max_density_zone_name,
+        evacuatedCount=model.evacuated_count,
     )
 
 

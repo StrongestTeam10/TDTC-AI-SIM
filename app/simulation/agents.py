@@ -43,12 +43,40 @@ class VisitorAgent(Agent):
     실제 통로를 걸어가는 것처럼 보이게 한다.
     """
 
-    MOVE_SPEED_M = 6.0
-    """한 스텝당 최대 이동 거리(로컬 좌표계, 대략 미터 단위). 임시 캘리브레이션 값."""
+    MOVE_SPEED_MIN_M = 6.0
+    MOVE_SPEED_MAX_M = 10.0
+    """2026-07-27 변경: 기존엔 전원 6.0m/스텝 고정이었음. STEP_DURATION_SECONDS=10초
+    기준으로 6.0m/10s는 초속 0.6m/s인데, 이건 근거 없이 잡은 값이었다. 일반적으로
+    알려진 보통 성인 보행 속도(약 1.0~1.5m/s)의 하한에 가까운 값을 혼잡한 시장
+    상황을 감안해 채택, 8~12m/10s(초속 0.8~1.2m/s) 구간에서 사람마다 랜덤 배정한다
+    (정확한 실측 근거는 없는 추정치 - 실측 데이터 확보 시 재보정 필요).
 
-    WANDER_PROBABILITY = 0.4
-    """매력도 차이가 없어도(=매대 데이터가 아직 없어도) 정상 보행 중에는 구역 안에서
-    계속 걸어다니는 것처럼 보이게 하는 확률."""
+    MOVE_SPEED_MIN_M/MAX_M은 클래스 상수(범위 정의)이고, 실제 각 에이전트의
+    속도는 __init__에서 self.move_speed_m으로 개별 배정된다."""
+
+    EVACUATION_THRESHOLD_BASE = 60.0
+    EVACUATION_THRESHOLD_RANGE = 30.0
+    """2026-07-27 추가: 예전엔 위험도 75점이 전원에게 똑같이 적용되는 대피 기준선이라,
+    임계값을 넘는 순간 그 구역 사람들이 한꺼번에 대피를 시작했다. 이제
+    risk_tolerance(0.3~0.9)에 따라 개인별 대피 임계값을 60~90점 사이로 다르게
+    잡아서(threshold = 60 + 30*risk_tolerance), 위험이 예민한 사람부터 먼저
+    반응하고 둔감한 사람은 늦게 반응하는 식으로 서서히 퍼지게 한다(임의 튜닝값)."""
+
+    RETURN_PENALTY_FACTOR = 0.3
+    """2026-07-27 추가: 정상 이동 시 방금 나온 구역으로 바로 되돌아갈 가중치에
+    곱하는 페널티(1.0이면 페널티 없음, 0에 가까울수록 강하게 억제). 완전히
+    막지는 않되, 목적 없이 왔다갔다하는 부자연스러운 움직임을 줄인다(임의 튜닝값)."""
+
+    MOVE_DECISION_PROBABILITY = 0.5
+    """2026-07-25 변경: 매 결정 시점(경로가 빈 상태)마다 이 확률로 "다음 목적지를
+    다시 고를지" 정한다. 안 고르면 이번 스텝은 제자리에 머문다(자연스러운 정지/배회)."""
+
+    STAY_WEIGHT = 1.5
+    """2026-07-25 추가: 목적지 후보 중 "지금 있는 구역"에 주는 기본 가중치.
+    인접 구역들(가중치 1.0 + 매력도)과 비교되는 값이라, 값을 낮출수록 구역
+    경계를 자주 넘나든다. 시장 구역 구분은 순전히 우리가 관리 편의상 나눈 것일 뿐,
+    실제 사람은 옆 구역이라고 안 넘어가지 않는다는 점을 반영 - 구역을 "물리적
+    장벽"이 아니라 "동등한 선택지 중 하나"로 취급한다(임의 튜닝값)."""
 
     def __init__(
         self,
@@ -64,7 +92,7 @@ class VisitorAgent(Agent):
         self.y = y
         self.state = VisitorState.NORMAL
         self.action_state = ActionState.ENTERING
-        
+
         # 에이전트 유형 할당 (20%, 60%, 20%)
         rand_val = random.random()
         if rand_val < 0.2:
@@ -76,18 +104,18 @@ class VisitorAgent(Agent):
         else:
             self.agent_type = AgentType.FOOD_TOUR
             self.speed = random.uniform(8.0, 10.0)
-            
+
         self.risk_tolerance = (
             risk_tolerance if risk_tolerance is not None else random.uniform(0.3, 0.9)
         )
         self._path: list[tuple[float, float, int | None]] = []
-        
+
         # 일정 관리
         self.itinerary: list[dict] = []
         self.stay_timer = 0
         self.wandering_tendency = random.uniform(0.1, 0.3)
         self.patience_for_waiting = random.randint(15, 30) # 대기 인원 15~30명 이상이면 포기
-        
+
         # 스폰 후 초기화 단계에서 방문 목적지 할당 (model 쪽에서 호출되거나 step 1에서 처리)
 
     def _assign_initial_itinerary(self):
@@ -104,8 +132,21 @@ class VisitorAgent(Agent):
             self.itinerary = self.model.get_random_pois(count=random.randint(1, 3))
         elif self.agent_type == AgentType.FOOD_TOUR:
             self.itinerary = self.model.get_random_pois(count=random.randint(1, 2))
-            
+
         self.action_state = ActionState.MOVING
+
+        # 2026-07-27 추가: 사람마다 다른 이동 속도(m/스텝).
+        self.move_speed_m = random.uniform(self.MOVE_SPEED_MIN_M, self.MOVE_SPEED_MAX_M)
+
+        # 2026-07-27 추가: 사람마다 다른 대피 시작 임계값. risk_tolerance가 낮을수록
+        # (위험에 예민할수록) 더 낮은 위험도에서 먼저 대피를 시작한다.
+        self.evacuation_threshold = (
+            self.EVACUATION_THRESHOLD_BASE + self.EVACUATION_THRESHOLD_RANGE * self.risk_tolerance
+        )
+
+        # 2026-07-27 추가: 방금 있었던 구역(직전 구역). 정상 이동 시 이 구역으로
+        # 바로 되돌아가는 걸 억제하는 데 쓰인다(완전 차단은 아님).
+        self._previous_zone_id: int | None = None
 
     def step(self) -> None:
         """한 타임스텝 동안의 행동."""
@@ -114,11 +155,14 @@ class VisitorAgent(Agent):
                 self.enter_timer = getattr(self, "enter_timer", 1) - 1
                 return # 첫 1스텝은 ENTERING 상태를 유지해 프론트엔드가 렌더링할 수 있게 함
             self._assign_initial_itinerary()
-            
+
         zone_risk = self.model.zone_risk_score(self.zone_id)
 
         # 1. Situation 평가 (위험도)
-        if zone_risk >= 75.0 or self.state is VisitorState.EVACUATING:
+        if zone_risk >= self.evacuation_threshold or self.state is VisitorState.EVACUATING:
+            if self.state is not VisitorState.EVACUATING:
+                self.model.ever_evacuating = True
+                self.model.evacuated_count += 1
             self.state = VisitorState.EVACUATING
             self.action_state = ActionState.EXITING
             self._ensure_path_to_exit()
@@ -138,7 +182,7 @@ class VisitorAgent(Agent):
     def _process_staying(self) -> None:
         if self.state == VisitorState.EVACUATING:
             return # 대피 중이면 머무르지 않음
-            
+
         if self.stay_timer > 0:
             self.stay_timer -= 1
         else:
@@ -150,7 +194,7 @@ class VisitorAgent(Agent):
         # 목적지가 없고 이동 중이면 다음 목적지를 계획
         if not self._path:
             self._plan_next_destination()
-            
+
         # 즉흥적 이탈 (샛길 방문)
         if self.itinerary and random.random() < self.wandering_tendency * 0.1:
             near_pois = self.model.get_pois_near(self.x, self.y, radius=30.0)
@@ -173,9 +217,9 @@ class VisitorAgent(Agent):
                 self._plan_next_destination()
             else:
                 self._ensure_path_to_exit()
-                
+
         self._advance_along_path()
-        # 실제 시뮬레이션에서는 맵 경계를 벗어나면 에이전트 소멸 처리를 할 수 있지만, 
+        # 실제 시뮬레이션에서는 맵 경계를 벗어나면 에이전트 소멸 처리를 할 수 있지만,
         # 이 코드베이스는 에이전트 리스트에서 지우는 로직이 model에 있을 것이라 가정(또는 단순히 외곽에 뭉침)
 
     def _plan_next_destination(self) -> None:
@@ -183,9 +227,9 @@ class VisitorAgent(Agent):
             self.action_state = ActionState.EXITING
             self._ensure_path_to_exit()
             return
-            
+
         next_poi = self.itinerary[0]
-        
+
         # 혼잡도 체크하여 포기할지 결정 (ABORT)
         wait_count = self.model.count_agents_near(next_poi["x"], next_poi["y"], radius_m=5.0)
         if wait_count > self.patience_for_waiting:
@@ -193,22 +237,25 @@ class VisitorAgent(Agent):
             self.itinerary.pop(0)
             self._plan_next_destination()
             return
-            
+
         self._path = self.model.build_path(self.x, self.y, next_poi["x"], next_poi["y"], next_poi["zone_id"])
 
     def _advance_along_path(self) -> None:
-        """경로를 따라 이번 스텝에 이동 가능한 최대 거리(MOVE_SPEED_M)만큼 이동한다.
+        """경로를 따라 이번 스텝에 이동 가능한 최대 거리(self.move_speed_m)만큼 이동한다.
 
         2026-07-25 수정: 예전엔 첫 웨이포인트 하나만 보고, 그게 이동 가능 거리보다
         가까우면 남은 이동 여력을 그냥 버렸다. WalkableGrid 경유점이 촘촘해서
         (칸 하나당 1m 안팎) 실제로는 한 스텝에 1m씩만 전진하는 꼴이 됐고, 목적지가
         멀면 수십 스텝이 걸려 "거의 안 움직이는" 것처럼 보였다. 이제 남은 이동
         여력이 있는 한 다음 웨이포인트로 계속 이어서 소진한다.
+
+        2026-07-27 수정: 속도가 클래스 공통값(MOVE_SPEED_M)에서 개인별 값
+        (self.move_speed_m)으로 바뀌었다.
         """
         if not self._path:
             return
 
-        speed = self.speed
+        speed = self.move_speed_m
         if self.state is VisitorState.CONGESTED:
             speed *= 0.4
 
@@ -216,24 +263,39 @@ class VisitorAgent(Agent):
         dx, dy = target_x - self.x, target_y - self.y
         dist = (dx * dx + dy * dy) ** 0.5
 
+            if dist <= remaining or dist == 0:
+                self.x, self.y = target_x, target_y
+                if arrive_zone is not None and arrive_zone != self.zone_id:
+                    self._previous_zone_id = self.zone_id
+                    self.zone_id = arrive_zone
+                self._path.pop(0)
+                remaining -= dist
+                if not self._path and self._heading_to_exit_gate:
+                    self.remove()
+                    return
+            else:
+                ratio = remaining / dist
+                self.x += dx * ratio
+                self.y += dy * ratio
+                remaining = 0
         if dist <= speed or dist == 0:
             self.x, self.y = target_x, target_y
             if arrive_zone is not None:
                 self.zone_id = arrive_zone
             self._path.pop(0)
-            
+
             # 도착했는데 현재 EXITING 상태이고 더 이상 경로가 없다면 화면에서 완전히 퇴장(소멸)
             if not self._path and self.action_state == ActionState.EXITING:
                 if self in self.model.agents:
                     self.model.agents.remove(self)
                 return
-            
+
             # 경로를 다 걸었고, 현재 목표가 itinerary의 POI였다면 STAYING 상태로 전환
             if not self._path and self.action_state == ActionState.MOVING and self.itinerary:
                 target_poi = self.itinerary[0]
                 # 타겟 근처에 도달했는지 확인
                 dist_to_poi = ((self.x - target_poi["x"])**2 + (self.y - target_poi["y"])**2)**0.5
-                if dist_to_poi < 5.0: 
+                if dist_to_poi < 5.0:
                     self.action_state = ActionState.STAYING
                     self.itinerary.pop(0)
                     if self.agent_type == AgentType.FOOD_TOUR:
@@ -284,6 +346,9 @@ class VisitorAgent(Agent):
         없으므로, 이제 "지금 구역에 머무르기"와 "각 인접 구역으로 이동하기"를
         전부 동등한 후보로 놓고 가중치 추첨(weighted random choice)한다.
         매력도는 그 가중치에 보너스를 줄 뿐, 이동 자체를 막는 게이트가 아니다.
+
+        2026-07-27 추가: 후보가 "방금 나왔던 구역"이면 가중치에
+        RETURN_PENALTY_FACTOR를 곱해서 즉시 왕복(되돌아가기)을 억제한다.
         """
         if self._path:
             return
@@ -292,10 +357,16 @@ class VisitorAgent(Agent):
 
         neighbors = self.model.neighbors_of(self.zone_id)
         candidates = [self.zone_id] + neighbors
-        weights = [
-            self.STAY_WEIGHT if zid == self.zone_id else 1.0 + self.model.attraction_of(zid)
-            for zid in candidates
-        ]
+        weights = []
+        for zid in candidates:
+            if zid == self.zone_id:
+                w = self.STAY_WEIGHT
+            else:
+                w = 1.0 + self.model.attraction_of(zid)
+                if zid == self._previous_zone_id:
+                    # 2026-07-27 추가: 방금 나온 구역으로 바로 되돌아가는 걸 억제
+                    w *= self.RETURN_PENALTY_FACTOR
+            weights.append(w)
         target_zone = random.choices(candidates, weights=weights, k=1)[0]
 
         dest_x, dest_y = self.model.random_point_in_zone(target_zone)
