@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from enum import Enum
@@ -262,6 +263,22 @@ EVENT_ZONE_ATTRACTION = 9.0
 REST_AREA_ATTRACTION = 2.5
 OBSTACLE_BASE_RADIUS_M = 1.5
 
+CONGESTION_ATTRACTION_DECAY = 3.0
+"""2026-07-27 추가: 구역이 혼잡할수록(명/m^2) 매력도가 체감하는 정도를 조절하는
+계수. attraction_of()에서 base_attraction / (1 + density * 이 값) 형태로 적용된다.
+값이 클수록 조금만 붐벼도 매력도가 빨리 깎인다(임의 튜닝값)."""
+
+
+def _saturating_attraction(base_weight: float, intensity: float) -> float:
+    """
+    2026-07-27 변경: 오브젝트 강도(intensity)에 따른 매력도 증가를 선형이 아니라
+    포화 곡선(제곱근)으로 바꿨다. 이전엔 intensity가 늘어난 만큼 매력도가 그대로
+    비례해서 늘었는데, 실제로는 "이미 충분히 눈에 띄는 오브젝트"가 강도를 더
+    올린다고 그만큼 더 매력적이지는 않다는 점을 반영한 것 - 강도 0.5에서 1.0으로
+    올려도 효과 증가폭이 처음보다 완만해진다(임의 튜닝, sqrt 곡선).
+    """
+    return base_weight * math.sqrt(max(intensity, 0.0))
+
 
 def apply_scenario_overrides(
     layout: MarketLayout,
@@ -282,11 +299,11 @@ def apply_scenario_overrides(
             lx, ly = rp.x, rp.y
 
         if obj.objectType == "food_truck":
-            spec.attraction += FOOD_TRUCK_ATTRACTION * obj.intensity
+            spec.attraction += _saturating_attraction(FOOD_TRUCK_ATTRACTION, obj.intensity)
         elif obj.objectType == "event_zone":
-            spec.attraction += EVENT_ZONE_ATTRACTION * obj.intensity
+            spec.attraction += _saturating_attraction(EVENT_ZONE_ATTRACTION, obj.intensity)
         elif obj.objectType == "rest_area":
-            spec.attraction += REST_AREA_ATTRACTION * obj.intensity
+            spec.attraction += _saturating_attraction(REST_AREA_ATTRACTION, obj.intensity)
         elif obj.objectType == "obstacle":
             radius = OBSTACLE_BASE_RADIUS_M * (0.5 + obj.intensity)
             extra_obstacles.append((lx, ly, radius))
@@ -405,6 +422,12 @@ class MarketDigitalTwin(Model):
         # 2026-07-25 추가: 대피가 실제로 완료됐는지(게이트 통과해서 퇴장) 판정하는 데 사용.
         self.ever_evacuating: bool = False
 
+        # 2026-07-27 추가: 시뮬레이션 도중 한 번이라도 대피 상태(EVACUATING)로
+        # 전환된 에이전트 수 누적 카운터. 보고서에서 "위험 인원 N명" 서술에 쓴다.
+        # 게이트가 닫혀 실제로 못 나갔어도(제자리에 멈춰있어도) 위험 판정 자체는
+        # 발생했으므로 카운트에 포함한다.
+        self.evacuated_count: int = 0
+
         # 2026-07-25 추가: 화재 이벤트로 실측 밀집도와 무관하게 강제로 끌어올린
         # 구역별 위험도. set_forced_risk()로 채워지고 evaluate_risk()가 반영한다.
         self.forced_risk: dict[int, float] = {}
@@ -412,6 +435,10 @@ class MarketDigitalTwin(Model):
 
         self.pois: list[dict] = []
         self._init_pois()
+
+        # 2026-07-27 추가: evaluate_risk()에서 한 번 계산한 구역별 인원수를
+        # attraction_of()가 재사용하기 위한 캐시(중복 계산 방지).
+        self._zone_counts_cache: dict[int, int] = {}
 
         self._spawn_agents()
 
@@ -590,6 +617,7 @@ class MarketDigitalTwin(Model):
         기반 점수보다 강제 점수가 높으면 그 값으로 덮어쓴다.
         """
         counts = self.current_zone_counts()
+        self._zone_counts_cache = counts
         self._risk = {}
         for zone_id, spec in self.layout.zones.items():
             assessment = assess_zone(
@@ -633,6 +661,8 @@ class MarketDigitalTwin(Model):
         for agent in list(self.agents):
             dx, dy = agent.x - x, agent.y - y
             if (dx * dx + dy * dy) ** 0.5 <= radius_m:
+                if agent.state is not VisitorState.EVACUATING:
+                    self.evacuated_count += 1
                 agent.state = VisitorState.EVACUATING
                 self.ever_evacuating = True
 
@@ -667,8 +697,22 @@ class MarketDigitalTwin(Model):
         return self.layout.allowed_neighbors(zone_id)
 
     def attraction_of(self, zone_id: int) -> float:
+        """
+        해당 구역에 배치된 매대(오브젝트)들의 weight 합에, 현재 혼잡도에 따른
+        체감 할인을 적용한 값.
+
+        2026-07-27 추가: 이미 붐비는 구역은 매력도가 그대로여도 사람들이 덜
+        끌리게(체감 매력 감소) 만든다 - "이미 사람이 많으면 오히려 덜 매력적으로
+        느껴진다"는 실제 경향을 반영. 밀집도(명/m^2)가 높을수록
+        1/(1+density*CONGESTION_ATTRACTION_DECAY) 배로 할인된다(임의 튜닝값).
+        """
         spec = self.layout.zones.get(zone_id)
-        return spec.attraction if spec else 0.0
+        if spec is None or spec.attraction <= 0:
+            return 0.0
+        count = self._zone_counts_cache.get(zone_id, 0)
+        density = count / spec.area_m2 if spec.area_m2 > 0 else 0.0
+        congestion_discount = 1.0 / (1.0 + density * CONGESTION_ATTRACTION_DECAY)
+        return spec.attraction * congestion_discount
 
     def gate_in_zone(self, zone_id: int) -> dict | None:
         """
