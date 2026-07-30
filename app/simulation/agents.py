@@ -17,10 +17,10 @@ class VisitorState(str, Enum):
     """위험 감지로 출구를 향해 대피 중."""
 
 class ActionState(str, Enum):
-    ENTERING = "entering"
-    MOVING = "moving"
-    STAYING = "staying"
-    EXITING = "exiting"
+    ENTERING = "ENTERING"
+    MOVING = "MOVING"
+    STAYING = "STAYING"
+    EXITING = "EXITING"
 
 class AgentType(str, Enum):
     PASS_THROUGH = "PASS_THROUGH"
@@ -93,8 +93,13 @@ class VisitorAgent(Agent):
     def _assign_initial_itinerary(self):
         # 목적지가 없으면 model에서 POI를 할당받음
         if self.agent_type == AgentType.PASS_THROUGH:
-            # 통행형은 목적지 없음. 바로 반대편 출구(임의의 다른 구역 출구) 찾음
-            pass
+            # 통행형은 자신이 들어온 출구가 아닌 '반대편 출구' 중 하나를 목적지로 설정
+            other_gates = [g for g in self.model.layout.gates if g.get("zone_id") != self.zone_id and g.get("zone_id") is not None]
+            if other_gates:
+                target_gate = random.choice(other_gates)
+                self.itinerary = [{"x": target_gate["x"], "y": target_gate["y"], "zone_id": target_gate["zone_id"]}]
+            else:
+                self.itinerary = []
         elif self.agent_type == AgentType.SHOPPING:
             self.itinerary = self.model.get_random_pois(count=random.randint(1, 3))
         elif self.agent_type == AgentType.FOOD_TOUR:
@@ -105,6 +110,9 @@ class VisitorAgent(Agent):
     def step(self) -> None:
         """한 타임스텝 동안의 행동."""
         if self.action_state == ActionState.ENTERING:
+            if getattr(self, "enter_timer", 1) > 0:
+                self.enter_timer = getattr(self, "enter_timer", 1) - 1
+                return # 첫 1스텝은 ENTERING 상태를 유지해 프론트엔드가 렌더링할 수 있게 함
             self._assign_initial_itinerary()
             
         zone_risk = self.model.zone_risk_score(self.zone_id)
@@ -213,6 +221,12 @@ class VisitorAgent(Agent):
             if arrive_zone is not None:
                 self.zone_id = arrive_zone
             self._path.pop(0)
+            
+            # 도착했는데 현재 EXITING 상태이고 더 이상 경로가 없다면 화면에서 완전히 퇴장(소멸)
+            if not self._path and self.action_state == ActionState.EXITING:
+                if self in self.model.agents:
+                    self.model.agents.remove(self)
+                return
             
             # 경로를 다 걸었고, 현재 목표가 itinerary의 POI였다면 STAYING 상태로 전환
             if not self._path and self.action_state == ActionState.MOVING and self.itinerary:
