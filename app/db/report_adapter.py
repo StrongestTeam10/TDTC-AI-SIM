@@ -28,24 +28,23 @@ from app.schemas.report_models import (
 
 
 POLICY_CODE_TO_TYPE = {
-    "NIGHT": ScenarioType.NIGHT_MARKET,
-    "WALK": ScenarioType.PEDESTRIAN_DIRECTION,
-    "FACIL": ScenarioType.FACILITY_RELOCATION,
-    "EVENT": ScenarioType.EVENT_OPERATION,
-    "EMERG": ScenarioType.EMERGENCY_RESPONSE,
-    "COMBO": ScenarioType.COMBINED_POLICY,
-    "CUSTM": ScenarioType.CUSTOM,
+    # 정책 유형
+    # BE 공통코드(POL 그룹) - 사고·이벤트 유형
+    "POLNO": ScenarioType.CUSTOM,
+    "POLFR": ScenarioType.EMERGENCY_RESPONSE,
+    "POLAC": ScenarioType.EMERGENCY_RESPONSE,
+    "POLCB": ScenarioType.PEDESTRIAN_DIRECTION,
 }
 
 POLICY_CODE_TO_TITLE = {
-    "NIGHT": "야시장 운영",
-    "WALK": "보행동선 변경",
-    "FACIL": "편의시설 배치 변경",
-    "EVENT": "행사 운영",
-    "EMERG": "비상 대응",
-    "COMBO": "복합 정책변경",
-    "CUSTM": "정책변경",
+    "POLNO": "정책변경",
+    "POLFR": "화재 대응",
+    "POLAC": "음향 이상 대응",
+    "POLCB": "통로 폐쇄",
 }
+
+# 정책 유형을 특정하지 못하는 코드
+NEUTRAL_POLICY_CODES = {"POLNO", "CUSTM"}
 
 
 def _as_json(value: Any, *, field_name: str) -> Any:
@@ -222,6 +221,29 @@ def _to_alternative(
         executed_at=result.executed_at,
     )
 
+def _resolve_policy_code(
+    baseline_row: ScenarioRow,
+    scenarios: list[ScenarioRow],
+) -> str:
+    """보고서 제목·RAG 검색에 쓸 정책 유형 코드를 고른다.
+
+    기준안은 정책 미적용 상태라 유형을 특정하지 못하는 값일 수 있다. 
+    그 값으로 제목을 만들면 "정책변경"이라는 말만 남으므로, 이때는 대안 쪽 코드를 대신 사용한다.
+    """
+
+    code = (baseline_row.policy_type_code or "").upper()
+    if code and code not in NEUTRAL_POLICY_CODES:
+        return code
+
+    for row in sorted(scenarios, key=lambda item: item.scenario_id):
+        if row.scenario_id == baseline_row.scenario_id:
+            continue
+        candidate = (row.policy_type_code or "").upper()
+        if candidate and candidate not in NEUTRAL_POLICY_CODES:
+            return candidate
+
+    return code
+
 
 def _scenario_type(
     policy_code: str,
@@ -309,7 +331,7 @@ def build_report_request(bundle: DbReportBundle) -> ReportRequest:
 
     baseline_row = baseline_rows[0]
     baseline_config = configs[baseline_row.scenario_id]
-    policy_code = baseline_row.policy_type_code.upper()
+    policy_code = _resolve_policy_code(baseline_row, scenarios)
 
     alternatives = [
         _to_alternative(

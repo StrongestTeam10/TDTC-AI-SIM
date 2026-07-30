@@ -7,7 +7,7 @@
   },
   "change_id": 71001,
   "market": {
-    "market_id": "MKT-001",
+    "market_id": 1,
     "market_name": "망원시장",
     "latitude": null,
     "longitude": null
@@ -17,7 +17,7 @@
       "scenario_id": 110001,
       "change_id": 71001,
       "scenario_name": "현행안",
-      "market_id": "MKT-001",
+      "market_id": 1,
       "virtual_config": {
         "is_baseline": true,
         "simulation_context": {
@@ -53,7 +53,7 @@
       "scenario_id": 110002,
       "change_id": 71001,
       "scenario_name": "대안 A: 중앙통로 일방통행",
-      "market_id": "MKT-001",
+      "market_id": 1,
       "virtual_config": {
         "is_baseline": false,
         "simulation_context": {
@@ -105,7 +105,7 @@
       "scenario_id": 110003,
       "change_id": 71001,
       "scenario_name": "대안 B: 일방통행+분산 출입",
-      "market_id": "MKT-001",
+      "market_id": 1,
       "virtual_config": {
         "is_baseline": false,
         "simulation_context": {
@@ -166,7 +166,7 @@
       "scenario_id": 110004,
       "change_id": 71001,
       "scenario_name": "대안 C: 시간대 예약 입장",
-      "market_id": "MKT-001",
+      "market_id": 1,
       "virtual_config": {
         "is_baseline": false,
         "simulation_context": {
