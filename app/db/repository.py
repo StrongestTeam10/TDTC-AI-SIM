@@ -5,6 +5,7 @@ Mesa 모델은 SQL을 직접 작성하지 않고 이 계층을 통해서만 데�
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from app.db.connection import get_cursor
@@ -31,13 +32,21 @@ def fetch_zones(market_id: int) -> list[dict]:
 
 
 def fetch_adjacency(market_id: int, active_only: bool = True) -> list[dict]:
+    """
+    MRKADJC01M에는 market_id가 없으므로(from_zone_id가 속한 구역을 통해 이미 알 수
+    있어 중복이었음, BE ZoneAdjacencyRepository와 동일한 방식) MRKADDR01D(구역)를
+    from_zone_id 기준으로 조인해 시장 단위로 필터링한다. uq_mrkadjc01m_edge 제약상
+    from/to 조합은 항상 같은 시장 내에서만 만들어지므로 from_zone_id 조인만으로 충분하다.
+    """
     sql = (
-        "SELECT adjacency_id, from_zone_id, to_zone_id, path_width, distance_m, "
-        "is_active, path_coordinates "
-        "FROM mrkadjc01m WHERE market_id = %s"
+        "SELECT a.adjacency_id, a.from_zone_id, a.to_zone_id, a.path_width, a.distance_m, "
+        "a.is_active, a.path_coordinates "
+        "FROM mrkadjc01m a "
+        "JOIN mrkaddr01d z ON z.zone_id = a.from_zone_id "
+        "WHERE z.market_id = %s"
     )
     if active_only:
-        sql += " AND is_active = TRUE"
+        sql += " AND a.is_active = TRUE"
     with get_cursor() as cur:
         cur.execute(sql, (market_id,))
         return cur.fetchall()
@@ -72,56 +81,88 @@ def fetch_stalls(market_id: int) -> list[dict]:
         return cur.fetchall()
 
 
-def fetch_crowd_density(market_id: int, captured_at: datetime | None = None) -> list[dict]:
+def fetch_latest_pedestrian_frames(market_id: int, captured_at: datetime | None = None) -> list[dict]:
     """
-    구역별 인구 밀집도 관측값.
+    구역별 CCTV 프레임 좌표 1건을 조회한다.
 
-    CRDDNST01M에는 market_id가 없으므로 MRKADDR01D(구역)를 조인해 시장 단위로 필터링한다.
-    captured_at이 없으면 각 구역의 최신 1건을 가져온다.
+    2026-07-31: 파이프라인 A의 실측 관측값 소스를 센서(CRDDNST01M, DROP됨)에서
+    CCTV 보행자 좌표(PEDAGGR01H)로 전환. PEDAGGR01H에는 zone_id가 없으므로
+    VDOCLIP01M(zone_id 보유)을 clip_id로, MRKADDR01D(market_id 보유)를 zone_id로
+    조인해서 시장 단위로 필터링한다.
+
+    captured_at을 지정하지 않으면 구역별 최신 1건을 가져온다. 같은 클립(영상) 안의
+    프레임들은 captured_at이 전부 동일한 값으로 적재되므로(실제 데이터로 확인됨),
+    "가장 최신 프레임"을 구분하려면 frame_id를 보조 정렬 기준으로 반드시 같이 써야
+    한다 - captured_at만으로 정렬하면 같은 클립 내에서 순서가 임의로 섞인다.
     """
+    base_select = (
+        "SELECT DISTINCT ON (v.zone_id) "
+        "p.coord_id, v.zone_id, p.bev_xyz_json, p.captured_at, p.frame_id "
+        "FROM pedaggr01h p "
+        "JOIN vdoclip01m v ON v.clip_id = p.clip_id "
+        "JOIN mrkaddr01d z ON z.zone_id = v.zone_id "
+    )
     with get_cursor() as cur:
         if captured_at is not None:
             cur.execute(
-                """
-                SELECT c.zone_id, c.visitor_count, c.density_score,
-                       c.status_level, c.captured_at
-                FROM crddnst01m c
-                JOIN mrkaddr01d z ON z.zone_id = c.zone_id
-                WHERE z.market_id = %s AND c.captured_at = %s
-                """,
+                base_select
+                + "WHERE z.market_id = %s AND p.captured_at = %s "
+                "ORDER BY v.zone_id, p.frame_id DESC",
                 (market_id, captured_at),
             )
         else:
             cur.execute(
-                """
-                SELECT DISTINCT ON (c.zone_id)
-                       c.zone_id, c.visitor_count, c.density_score,
-                       c.status_level, c.captured_at
-                FROM crddnst01m c
-                JOIN mrkaddr01d z ON z.zone_id = c.zone_id
-                WHERE z.market_id = %s
-                ORDER BY c.zone_id, c.captured_at DESC
-                """,
+                base_select
+                + "WHERE z.market_id = %s "
+                "ORDER BY v.zone_id, p.captured_at DESC, p.frame_id DESC",
                 (market_id,),
             )
         return cur.fetchall()
 
 
+def count_people_in_frame(bev_xyz_json) -> int:
+    """
+    bev_xyz_json 1건의 인원수를 센다.
+
+    실제 적재 데이터를 확인한 결과 {"person_1": {"x":..,"y":..}, "person_2": {...}}
+    형태의 JSON **객체**다(배열이 아님 - PEDAGGR01H 테이블 정의 주석에 남아있던
+    "JSON 배열" 가정은 폐기, person_N은 프레임 간 지속되는 추적 ID). 최상위 키
+    개수가 곧 해당 프레임의 인원수다.
+    """
+    if not bev_xyz_json:
+        return 0
+    data = bev_xyz_json if isinstance(bev_xyz_json, dict) else json.loads(bev_xyz_json)
+    return len(data)
+
+
 def insert_risk_results(assessments: list[dict]) -> int:
     """
     산출된 위험도를 mrkrisk01m에 기록한다.
-    MRKRISK01M에는 market_id가 없고 zone_id로만 시장을 식별한다.
+
+    2026-07-31: MRKRISK01M의 그레인이 "구역 단위(zone_id)"에서 "CCTV 프레임
+    좌표 1건 단위(coord_id, PEDAGGR01H 참조)"로 바뀜에 따라 zone_id 대신 coord_id로
+    INSERT하도록 변경. coord_id는 NOT NULL FK라 호출부(app/api/simulate.py)가
+    CCTV 프레임이 있는 구역만 걸러서 넘겨줘야 한다 - 프레임이 없는 구역은 이
+    함수에서도 한 번 더 방어적으로 걸러낸다.
+    total_count는 해당 프레임의 실측 인원수(선택 컬럼, ERD상 nullable).
     """
-    if not assessments:
+    rows = [a for a in assessments if a.get("coordId") is not None]
+    if not rows:
         return 0
     with get_cursor() as cur:
         cur.executemany(
             "INSERT INTO mrkrisk01m "
-            "(zone_id, risk_score, risk_level, reason_code, detected_at) "
-            "VALUES (%s, %s, %s, %s, NOW())",
+            "(coord_id, risk_score, risk_level, reason_code, detected_at, total_count) "
+            "VALUES (%s, %s, %s, %s, NOW(), %s)",
             [
-                (a["zoneId"], a["riskScore"], a["riskLevel"], a["reason"][:200])
-                for a in assessments
+                (
+                    a["coordId"],
+                    a["riskScore"],
+                    a["riskLevel"],
+                    a["reason"][:200],
+                    a.get("totalCount"),
+                )
+                for a in rows
             ],
         )
-        return len(assessments)
+        return len(rows)

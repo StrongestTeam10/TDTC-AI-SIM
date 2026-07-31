@@ -1,5 +1,43 @@
 # Changelog
 
+### 2026-07-31 (fetch_adjacency: mrkadjc01m에서 존재하지 않는 market_id 컬럼 참조 수정)
+- **문제**: `mrkadjc01m`은 이미 `market_id` 컬럼이 없는 스키마인데(BE
+  `ZoneAdjacencyRepository`는 Zone과 조인해서 처리하도록 이미 반영돼 있었음),
+  SIM의 `fetch_adjacency()`만 `FROM mrkadjc01m WHERE market_id = %s`로 존재하지 않는
+  컬럼을 직접 조회하고 있었음 — 실행 시 컬럼 없음 오류 발생
+- ✏️ `app/db/repository.py`의 `fetch_adjacency()`: `mrkaddr01d`(구역)를 `from_zone_id`
+  기준으로 조인해 시장 단위로 필터링하도록 변경 (`fetch_crowd_density()`, BE
+  `ZoneAdjacencyRepository.findByMarketId()`와 동일한 패턴)
+
+### 2026-07-31 (파이프라인 A 실측 소스를 CCTV(PEDAGGR01H)로 전환 - insert_risk_results 근본 수정)
+- **문제**: `insert_risk_results()`가 `mrkrisk01m`에 `zone_id`로 INSERT하고 있었는데,
+  ERD 반영 이후 `mrkrisk01m`은 `coord_id`(CCTV 프레임 좌표 1건) 기준 그레인으로 이미
+  바뀐 상태. 게다가 관측값 소스였던 `fetch_crowd_density()`가 읽던 `crddnst01m`
+  테이블 자체가 센서 삭제 세션에서 DROP되어, 파이프라인 A(`/simulate/snapshot`)가
+  이미 죽어있는 상태였음
+- 🗑️ `fetch_crowd_density()` 삭제 (읽던 테이블이 더 이상 존재하지 않음)
+- 🆕 `fetch_latest_pedestrian_frames(market_id, captured_at=None)`: `PEDAGGR01H` →
+  `VDOCLIP01M`(zone_id) → `MRKADDR01D`(market_id) 조인으로 구역별 최신 CCTV 프레임
+  1건을 조회. 같은 클립 내 `captured_at`이 전부 동일해서 `frame_id`를 보조 정렬
+  기준으로 사용(실제 데이터로 확인된 특성)
+- 🆕 `count_people_in_frame(bev_xyz_json)`: `bev_xyz_json`이 `{"person_1":{...}, ...}`
+  형태의 JSON **객체**임을 실제 데이터로 확인하고 그에 맞게 파싱(테이블 정의 주석에
+  남아있던 "JSON 배열" 가정 폐기, 최상위 키 개수 = 인원수)
+- ✏️ `insert_risk_results()`: `zone_id` → `coord_id` 기준 INSERT로 변경. `coord_id`는
+  NOT NULL FK라 호출부에서 CCTV 프레임이 있는 구역만 걸러서 넘기고, 함수 내부에서도
+  한 번 더 방어적으로 필터링. `total_count`(실측 인원수)도 함께 저장
+- ✏️ `app/api/simulate.py`
+  - `simulate_snapshot()`(`/simulate/snapshot`, 파이프라인 A): 관측값 소스를
+    `fetch_latest_pedestrian_frames()`로 전환, 구역별 `coord_id`를 저장해뒀다가
+    위험도 저장 시 함께 넘김(프레임 없는 구역은 저장 대상에서 제외)
+  - `simulate_predict()`(`/simulate/predict`, 파이프라인 B): 초기 관측값 소스도
+    동일하게 전환(이쪽은 `mrkrisk01m`에 저장하지 않으므로 `coord_id` 불필요)
+- ✏️ `resources`(BE) `schema-init.sql`의 `pedaggr01h` 주석: "JSON 배열" 가정을
+  실제 확인된 객체 형태로 수정 (BE 저장소 CHANGELOG 참고)
+- **남은 전제조건**: 카메라 설치 위경도/방위(heading) 확인 및 `bev_xyz_json` 원점
+  좌표계 검증은 여전히 미해결 — 현재는 "원점=구역 중심점" 가정으로 진행 중(이전
+  세션에서 재재님이 확정한 임시 전제)이며, 이 값이 정확한지 재재님 확인이 필요합니다
+
 
 ### 2026-07-24 (격자 기반 이동으로 전면 교체 — 폴리곤 이탈 근본 해결 + 오브젝트 회피)
 - **근본 원인 재확인**: 앞선 수정(경계 웨이포인트, 회전 사각형 샘플링)에도 여전히

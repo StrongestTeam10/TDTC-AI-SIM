@@ -56,22 +56,37 @@ def _load_layout(market_id: int) -> MarketLayout:
 def simulate_snapshot(req: SnapshotRequest) -> SnapshotResponse:
     layout = _load_layout(req.marketId)
 
-    densities = repo.fetch_crowd_density(req.marketId, req.capturedAt)
+    frames = repo.fetch_latest_pedestrian_frames(req.marketId, req.capturedAt)
 
     observations: dict[int, ZoneObservation] = {}
-    for row in densities:
+    zone_coord_ids: dict[int, int] = {}
+    for row in frames:
         zid = row["zone_id"]
         observations[zid] = ZoneObservation(
             zone_id=zid,
-            visitor_count=row["visitor_count"] or 0,
+            visitor_count=repo.count_people_in_frame(row["bev_xyz_json"]),
         )
+        zone_coord_ids[zid] = row["coord_id"]
 
     model = MarketDigitalTwin(layout, observations, mode=SimulationMode.MIRROR)
     snap = model.snapshot()
 
     persisted = 0
     if req.persistRisk:
-        persisted = repo.insert_risk_results(snap["zones"])
+        # mrkrisk01m.coord_id는 NOT NULL FK라, 이번 조회에서 CCTV 프레임이
+        # 없었던 구역(zone_coord_ids에 없음)은 저장 대상에서 제외한다.
+        assessments = [
+            {
+                "coordId": zone_coord_ids.get(z["zoneId"]),
+                "riskScore": z["riskScore"],
+                "riskLevel": z["riskLevel"],
+                "reason": z["reason"],
+                "totalCount": z["visitorCount"],
+            }
+            for z in snap["zones"]
+            if zone_coord_ids.get(z["zoneId"]) is not None
+        ]
+        persisted = repo.insert_risk_results(assessments)
 
     if not req.includeAgents:
         snap["agents"] = []
@@ -224,13 +239,13 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
 
     layout = _load_layout(req.marketId)
 
-    densities = repo.fetch_crowd_density(req.marketId, req.capturedAt)
+    densities = repo.fetch_latest_pedestrian_frames(req.marketId, req.capturedAt)
     observations: dict[int, ZoneObservation] = {}
     for row in densities:
         zid = row["zone_id"]
         observations[zid] = ZoneObservation(
             zone_id=zid,
-            visitor_count=row["visitor_count"] or 0,
+            visitor_count=repo.count_people_in_frame(row["bev_xyz_json"]),
         )
 
     model = MarketDigitalTwin(
