@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .analytics import AlternativeAssessment
@@ -40,6 +40,10 @@ class Narrative:
     limitations: list[str]
     flow_analysis: list[ScenarioFlowAnalysis]
     evidence_notes: list[EvidenceNote]
+
+    # 위험 이벤트가 있을 때만 채워진다. 이벤트가 없거나 템플릿 모드일 때는
+    # 빈 목록이고, 렌더러가 해당 절을 통째로 생략한다.
+    emergency_response: list[str] = field(default_factory=list)
 
 
 class NarrativeGenerator:

@@ -155,9 +155,11 @@ class DocxReportRenderer:
         table.style = "Table Grid"
         values = [
             ("보고서 ID", request.report_id),
-            ("정책변경 그룹", str(request.change_id)),
+            ("비교 기준", request.baseline.alternative_name),
             ("대상 시장", request.market.market_name),
-            ("작성 기준일", request.context.analysis_date.isoformat()),
+            # "작성 기준일"은 데이터의 기준 시점으로 읽히는데, 그 역할은 검토 개요의
+            # "시뮬레이션 기준 시점"이 맡는다. 여기는 문서를 만든 날이므로 "작성일"로 둔다.
+            ("작성일", request.context.analysis_date.isoformat()),
             ("검토 질문", request.decision_question),
         ]
         for row, (label, value) in zip(table.rows, values):
@@ -255,9 +257,10 @@ class DocxReportRenderer:
 
     def _scenario_table(self, document: Document, request: ReportRequest) -> None:
         self._add_heading(document, "3. 시나리오 구성", 1)
-        table = document.add_table(rows=1, cols=4)
+        # 기준안과 대안의 투입 인구 차이로 생긴 밀집도 변화를 정책 효과로 오해 방지를 위해 인구수 열 추가
+        table = document.add_table(rows=1, cols=5)
         table.style = "Table Grid"
-        headers = ["구분", "시나리오명", "설명", "주요 변경사항"]
+        headers = ["구분", "시나리오명", "투입 인구", "설명", "주요 변경사항"]
         for cell, header in zip(table.rows[0].cells, headers):
             self._set_cell_text(cell, header, True)
             self._shade(cell, "D9E5F6")
@@ -267,6 +270,8 @@ class DocxReportRenderer:
             values = [
                 "기준안" if index == 0 else f"대안 {index}",
                 alternative.alternative_name,
+                "미입력" if alternative.agent_count is None
+                else f"{alternative.agent_count:,}명",
                 alternative.description or "-",
                 interventions,
             ]
@@ -296,7 +301,7 @@ class DocxReportRenderer:
 
         table = document.add_table(
             rows=1,
-            cols=5,
+            cols=4,
         )
         table.style = "Table Grid"
 
@@ -305,7 +310,6 @@ class DocxReportRenderer:
             "최대 밀집도",
             "평균 밀집도",
             "위험점수",
-            "평균 체류시간",
         ]
 
         for cell, header in zip(
@@ -335,7 +339,6 @@ class DocxReportRenderer:
                 self._fmt(metrics.max_density_p_m2),
                 self._fmt(metrics.avg_density_p_m2),
                 self._fmt(metrics.risk_score, 0),
-                self._fmt(metrics.avg_dwell_time_min),
             ]
 
             cells = table.add_row().cells
@@ -385,6 +388,12 @@ class DocxReportRenderer:
         document.add_paragraph(narrative.current_issue)
         self._add_heading(document, "검토 근거", 2)
         document.add_paragraph(narrative.recommendation_rationale)
+
+        # 위험 이벤트가 없는 시나리오에서는 이 절 자체를 넣지 않는다.
+        if narrative.emergency_response:
+            self._add_heading(document, "위험 이벤트 대응 방안", 2)
+            self._add_bullets(document, narrative.emergency_response)
+
         self._add_heading(document, "후속 조치", 2)
         self._add_bullets(document, narrative.implementation_plan)
 
@@ -419,7 +428,6 @@ class DocxReportRenderer:
                 "멀티모달 위험도 분석 시스템에서 산출되어 "
                 "보고서 엔진에 전달된 위험도 값",
             ),
-            ("평균 체류시간", "방문객이 시장 안에 머문 평균 시간"),
         ]
         table = document.add_table(rows=1, cols=2)
         table.style = "Table Grid"

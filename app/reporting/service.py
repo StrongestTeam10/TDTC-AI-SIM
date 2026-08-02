@@ -70,7 +70,7 @@ class ReportService:
         )
         analysis_payload = {
             "report_id": request.report_id,
-            "change_id": request.change_id,
+            "baseline_scenario_id": request.baseline.alternative_id,
             "report_title": narrative.report_title,
             "report_title_generated_by_llm": (
                 request.generate_report_title
@@ -117,4 +117,8 @@ class ReportService:
         return {
             "docx": str(docx_path),
             "analysis": str(analysis_path),
+            # 문서 표지에 실제로 박힌 제목. 호출자(BE)가 목록 표시용으로 저장한다.
+            # request.report_title이 아니라 narrative.report_title이어야 한다.
+            # LLM이 제목을 다듬는 경우 둘이 달라지며, 표지에 쓰이는 쪽은 후자다.
+            "title": narrative.report_title,
         }

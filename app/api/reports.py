@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
@@ -47,7 +49,12 @@ def generate_report(bundle: DbReportBundle) -> dict[str, str]:
 
 @router.post("/file")
 def generate_report_file(bundle: DbReportBundle) -> FileResponse:
-    """보고서를 생성한 직후 DOCX 파일로 응답한다."""
+    """보고서를 생성한 직후 DOCX 파일로 응답한다.
+
+    본문이 파일이라 제목을 실을 곳이 없어 헤더로 함께 내려준다. 호출자(BE)가
+    목록 표시용으로 저장하며, 이래야 목록에 뜨는 제목과 문서 표지 제목이 일치한다.
+    HTTP 헤더는 ASCII만 담을 수 있으므로 퍼센트 인코딩한다(수신 측에서 UTF-8로 디코딩).
+    """
 
     try:
         report_id, paths = _generate(bundle)
@@ -58,6 +65,10 @@ def generate_report_file(bundle: DbReportBundle) -> FileResponse:
                 "wordprocessingml.document"
             ),
             filename=f"{report_id}.docx",
+            headers={
+                "X-Report-Id": report_id,
+                "X-Report-Title": quote(paths["title"]),
+            },
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
