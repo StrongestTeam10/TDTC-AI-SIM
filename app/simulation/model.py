@@ -34,41 +34,6 @@ from app.simulation.space import (
 )
 
 
-
-SHOP_DATA = {
-  "A_west": [
-    "망원수제고로케", "고손수제군만두", "알뜰살림센타", "큐스 2호점",
-    "진양수산", "망원시장 못난이만두", "아침엔바게트", "망원유통(13번과자가게)", "수리상점 곰손",
-    "올포유(15번)", "싱싱나라 야채", "무침프로젝트",
-    "범골커피(2F)", "고향집", "BYC 망원상회",
-    "강정선생", "민영활어공장 망원시장점", "티각태각(1F)", "송이네", "모든발"
-  ],
-  "A_east": [
-    "무궁화어묵 망원점", "프레쉬트레일 망원지점", "엄마손마트", "트라이",
-    "장수한방족발", "원당수제고로케(1층 3호)", "목포홍어무침각종전", "하나로축산",
-    "대게특별시 망원시장점(24호)", "마포축산", "이삭토스트(1F)", "전통맛죽",
-    "369활어회", "연만두 본점"
-  ],
-  "B_west": [
-    "훈이네빈대떡", "깜놀이네야채과일", "성미건어물(37번)", "우이락",
-    "엄마손왕두부", "부산대원어묵", "장충동한방족발", "홍보사", "엄마손반찬", "맛있는집",
-    "새나래수산", "마당쇠", "옹기마을", "참맛닭곰탕"
-  ],
-  "B_east": [
-    "진영농산물직판장", "망원닭강정", "털보네야채", "솔나무떡집",
-    "큐스닭강정", "오공찬(1F)", "망원튀맥집", "해피네바삭치킨", "홍두깨손칼국수",
-    "오지개", "뷰티크레딧", "고려왕족발", "틈새전", "망원떡갈비", "훈훈호떡",
-    "수경아채", "남도건어물"
-  ],
-  "C_west": [
-    "부자상회", "전국일 김치삼겹", "바다를 사랑하는 형제들", "포트캔커피 망원점", "철길떡볶이 망원시장점(101호)"
-  ],
-  "C_east": [
-    "대박수산", "형제건어물", "석규네수제한과(74호)", "교동왕족발",
-    "서울축산", "서민구판장", "망원축산", "바삭마차", "이포인트", "풍년기름", "와이레스 망원점"
-  ]
-}
-
 class SimulationMode(str, Enum):
     MIRROR = "mirror"
     SCENARIO = "scenario"
@@ -116,6 +81,7 @@ class MarketLayout:
     오목한 폴리곤 형태에서도 폴리곤 밖으로 나가지 않고, 매대/푸드트럭 같은
     오브젝트가 있으면 자동으로 회피한다 (2026-07-24 도입)."""
     gates: list[dict] = field(default_factory=list)
+    pois: list[dict] = field(default_factory=list)
     blocked_directions: set[tuple[int, int]] = field(default_factory=set)
     """2026-07-25 추가: 시나리오의 일방통행(one_way) 통로 정책으로 막힌 방향.
     (from_zone_id, to_zone_id) 쌍이 여기 있으면 그 방향으로는 이동하지 않는다."""
@@ -185,6 +151,7 @@ class MarketLayout:
             if nearest is not None:
                 nearest.is_exit_zone = True
 
+        pois: list[dict] = []
         for row in stall_rows:
             if row.get("latitude") is None or row.get("longitude") is None:
                 continue
@@ -198,6 +165,13 @@ class MarketLayout:
             if nearest_zone is not None:
                 weight = float(row["weight"]) if row.get("weight") is not None else 1.0
                 nearest_zone.attraction += weight
+                pois.append({
+                    "name": row.get("name", "Unknown"),
+                    "zone_id": nearest_zone.zone_id,
+                    "x": sx,
+                    "y": sy,
+                    "weight": weight
+                })
 
         graph = nx.Graph()
         for zone_id in zones:
@@ -251,6 +225,7 @@ class MarketLayout:
             graph=graph,
             walkable_grid=walkable_grid,
             gates=gates,
+            pois=pois,
         )
         layout._walkable_area = walkable_area
         layout._base_obstacles = obstacles
@@ -433,8 +408,7 @@ class MarketDigitalTwin(Model):
         self.forced_risk: dict[int, float] = {}
 
 
-        self.pois: list[dict] = []
-        self._init_pois()
+        self.pois: list[dict] = self.layout.pois
 
         # 2026-07-27 추가: evaluate_risk()에서 한 번 계산한 구역별 인원수를
         # attraction_of()가 재사용하기 위한 캐시(중복 계산 방지).
@@ -444,111 +418,6 @@ class MarketDigitalTwin(Model):
 
         self.evaluate_risk()
 
-
-    def _init_pois(self) -> None:
-        from shapely.geometry import box, LineString
-        W2_LAT, W2_LON = 37.55654668407929, 126.9060619136959
-        W1_LAT, W1_LON = 37.555882365686884, 126.90627211946713
-
-        w2_x, w2_y = self.layout.projection.to_local(W2_LAT, W2_LON)
-        w1_x, w1_y = self.layout.projection.to_local(W1_LAT, W1_LON)
-        
-        exc_box1 = box(w2_x - 14, w2_y - 6, w2_x + 14, w2_y + 6)
-        exc_box2 = box(w1_x - 14, w1_y - 6, w1_x + 14, w1_y + 6)
-
-        zone_groups = {"A": [], "B": [], "C": []}
-        
-        for zone_id, spec in self.layout.zones.items():
-            cx, cy = spec.polygon_local.centroid.x, spec.polygon_local.centroid.y
-            lat, lon = self.layout.projection.to_latlon(cx, cy)
-            
-            if lat > W2_LAT:
-                zone_groups["A"].append(spec.polygon_local)
-            elif lat > W1_LAT:
-                zone_groups["B"].append(spec.polygon_local)
-            else:
-                zone_groups["C"].append(spec.polygon_local)
-                
-        for group_name, poly_list in zone_groups.items():
-            if not poly_list:
-                continue
-                
-            group_poly = unary_union(poly_list)
-            boundary = group_poly.exterior
-            minx, miny, maxx, maxy = group_poly.bounds
-            
-            west_shops = SHOP_DATA.get(f"{group_name}_west", [])
-            east_shops = SHOP_DATA.get(f"{group_name}_east", [])
-            
-            def place_shops(shops: list[str], side: str):
-                if not shops:
-                    return
-                
-                num_points = max(200, len(shops) * 3)
-                step = (maxy - 2 - (miny + 2)) / max(1, num_points - 1)
-                ys = [miny + 2 + step * i for i in range(num_points)]
-                
-                valid_points = []
-                for y_val in ys:
-                    horiz_line = LineString([(minx - 10, y_val), (maxx + 10, y_val)])
-                    inter = boundary.intersection(horiz_line)
-                    
-                    if inter.is_empty:
-                        continue
-                        
-                    pts = []
-                    if inter.geom_type == 'Point':
-                        pts = [inter]
-                    elif inter.geom_type == 'MultiPoint':
-                        pts = list(inter.geoms)
-                    
-                    if not pts:
-                        continue
-                        
-                    if side == 'west':
-                        target_pt = min(pts, key=lambda p: p.x)
-                        offset = 1.0
-                    else:
-                        target_pt = max(pts, key=lambda p: p.x)
-                        offset = -1.0
-                        
-                    final_pt = Point(target_pt.x + offset, target_pt.y)
-                    
-                    if exc_box1.contains(final_pt) or exc_box2.contains(final_pt):
-                        continue
-                        
-                    valid_points.append(final_pt)
-                
-                if not valid_points:
-                    target_zones = list(self.layout.zones.keys())
-                    for s_name in shops:
-                        z_id = self._rng.choice(target_zones)
-                        x, y = self.random_point_in_zone(z_id)
-                        self.pois.append({"name": s_name, "zone_id": z_id, "x": x, "y": y, "weight": 1.0})
-                    return
-                    
-                step_idx = (len(valid_points) - 1) / max(1, len(shops) - 1)
-                indices = [int(round(step_idx * i)) for i in range(len(shops))]
-                
-                for idx, s_name in zip(indices, shops):
-                    pt = valid_points[idx]
-                    assigned_zone = None
-                    for z_id, spec in self.layout.zones.items():
-                        if spec.polygon_local.buffer(2.0).contains(pt):
-                            assigned_zone = z_id
-                            break
-                    if assigned_zone is None:
-                        assigned_zone = list(self.layout.zones.keys())[0]
-                        
-                    base_weight = 1.0
-                    spec = self.layout.zones.get(assigned_zone)
-                    if spec and spec.attraction > 0:
-                        base_weight += spec.attraction * 0.1
-                        
-                    self.pois.append({"name": s_name, "zone_id": assigned_zone, "x": pt.x, "y": pt.y, "weight": base_weight})
-
-            place_shops(west_shops, 'west')
-            place_shops(east_shops, 'east')
 
     def get_random_pois(self, count: int) -> list[dict]:
         if not self.pois:
