@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from urllib.parse import quote
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
@@ -12,6 +15,9 @@ from app.schemas.report_db_models import DbReportBundle
 
 
 router = APIRouter(prefix="/simulation/reports", tags=["simulation-reports"])
+
+# ReportMeta.report_id의 제약과 동일하게 유지할 것. 한쪽만 느슨해지면 그 경로로 뚫린다.
+REPORT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 service = ReportService(
     root=settings.project_root,
     vector_index_path=settings.vector_index_path,
@@ -47,7 +53,12 @@ def generate_report(bundle: DbReportBundle) -> dict[str, str]:
 
 @router.post("/file")
 def generate_report_file(bundle: DbReportBundle) -> FileResponse:
-    """보고서를 생성한 직후 DOCX 파일로 응답한다."""
+    """보고서를 생성한 직후 DOCX 파일로 응답한다.
+
+    본문이 파일이라 제목을 실을 곳이 없어 헤더로 함께 내려준다. 호출자(BE)가
+    목록 표시용으로 저장하며, 이래야 목록에 뜨는 제목과 문서 표지 제목이 일치한다.
+    HTTP 헤더는 ASCII만 담을 수 있으므로 퍼센트 인코딩한다(수신 측에서 UTF-8로 디코딩).
+    """
 
     try:
         report_id, paths = _generate(bundle)
@@ -58,6 +69,10 @@ def generate_report_file(bundle: DbReportBundle) -> FileResponse:
                 "wordprocessingml.document"
             ),
             filename=f"{report_id}.docx",
+            headers={
+                "X-Report-Id": report_id,
+                "X-Report-Title": quote(paths["title"]),
+            },
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -76,10 +91,25 @@ def generate_mock_report(mock_name: str) -> dict[str, str]:
     return generate_report(bundle)
 
 
+def _safe_report_id(report_id: str) -> str:
+    """경로에 쓰기 안전한 report_id인지 확인한다.
+
+    이 값이 폴더명·파일명으로 그대로 들어가므로, ".."나 절대경로가 섞이면
+    REPORT_OUTPUT_DIR 밖의 파일을 읽게 된다(Path 결합에서 절대경로는 앞부분을 덮어쓴다).
+    생성 경로는 ReportMeta.report_id의 pattern이 막지만, 이 조회 경로는 스키마를
+    거치지 않으므로 여기서 따로 검사한다.
+    """
+
+    if not REPORT_ID_PATTERN.fullmatch(report_id):
+        raise HTTPException(status_code=400, detail="report_id 형식이 올바르지 않습니다.")
+    return report_id
+
+
 @router.get("/{report_id}/docx")
 def download_docx(report_id: str) -> FileResponse:
     """생성된 DOCX 보고서를 내려준다."""
 
+    report_id = _safe_report_id(report_id)
     path = settings.output_dir / report_id / f"{report_id}.docx"
     if not path.exists():
         raise HTTPException(status_code=404, detail="보고서가 없습니다.")
@@ -97,6 +127,7 @@ def download_docx(report_id: str) -> FileResponse:
 def download_analysis(report_id: str) -> FileResponse:
     """보고서 생성 근거와 지표 비교가 담긴 JSON을 내려준다."""
 
+    report_id = _safe_report_id(report_id)
     path = settings.output_dir / report_id / f"{report_id}_analysis.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="분석 JSON이 없습니다.")

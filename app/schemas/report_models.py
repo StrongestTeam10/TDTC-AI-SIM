@@ -74,6 +74,12 @@ class AlternativeResult(BaseModel):
     alternative_id: str
     alternative_name: str
     description: str | None = None
+
+    # 시나리오별 투입 인구수. 기준안과 대안의 인구수가 다를 수 있으므로
+    # (야시장 개장처럼 정책이 방문객 수 자체를 늘리는 경우) 전역 값 하나로 두지 않고
+    # 각 시나리오가 자기 값을 들고 있어야 한다. 보고서 표에 열로 노출된다.
+    agent_count: int | None = Field(default=None, ge=0)
+
     interventions: list[Intervention] = Field(default_factory=list)
     metrics: MetricSet = Field(default_factory=MetricSet)
     density_timeseries: list[DensityTimePoint] = Field(
@@ -99,7 +105,6 @@ class ReportRequest(BaseModel):
     """DB 행을 보고서 생성에 적합한 구조로 변환한 내부 요청 모델."""
 
     report_id: str
-    change_id: int
     scenario_type: ScenarioType
     report_title: str
     generate_report_title: bool = False

@@ -5,54 +5,85 @@
     "decision_question": "보행약자 접근성을 높이면서 남문 주변 체류 혼잡을 줄일 수 있는 시설 재배치안은 무엇인가?",
     "disclaimer": "본 문서는 DB 구조 Mock 데이터를 바탕으로 자동 생성한 사전검토 초안입니다."
   },
-  "change_id": 73001,
   "market": {
     "market_id": 1,
     "market_name": "망원시장",
     "latitude": null,
     "longitude": null
   },
+  "baseline_scenario": {
+    "scenario_id": 130001,
+    "scenario_name": "현행 시설 배치",
+    "market_id": 1,
+    "virtual_config": {
+      "marketId": 1,
+      "agentCount": 2600,
+      "steps": 50,
+      "objects": [],
+      "corridorPolicies": [],
+      "events": [],
+      "closedGateIds": [],
+      "simulation_context": {
+        "analysis_date": "2026-07-21",
+        "simulation_start": "2026-08-15T17:00:00",
+        "simulation_end": "2026-08-15T22:00:00",
+        "expected_visitors": 2600,
+        "assumptions": [
+          "방문객 유입은 17시부터 증가해 19시 30분에 최고치에 도달한다.",
+          "점포와 고정 시설물의 위치는 시뮬레이션 기간 동안 변하지 않는다.",
+          "방문객은 혼잡 구역을 회피하되 목적지 선호를 유지한다.",
+          "결과는 동일 조건에서 20회 반복한 평균과 최대값을 사용한다."
+        ],
+        "model_version": "mesa-abm-mock-0.2",
+        "random_seed": 42,
+        "repetitions": 20,
+        "density_risk_threshold_p_m2": 6
+      }
+    },
+    "reg_datetime": "2026-07-21T09:00:00+09:00",
+    "agent_count": 2600,
+    "policy_type_code": "POLNO",
+    "created_at": "2026-07-21T09:00:00+09:00"
+  },
+  "baseline_result": {
+    "result_id": 230001,
+    "scenario_id": 130001,
+    "predicted_max_density": 5.7,
+    "predicted_density": 2.8,
+    "predicted_risk_score": 78,
+    "economic_effect_analysis": null,
+    "generated_report_path": null,
+    "avg_stay_time": "PT39.0M",
+    "flow_direction": {
+      "mode": "existing",
+      "direction": "BIDIRECTIONAL"
+    },
+    "executed_at": "2026-08-15T22:00:00"
+  },
   "scenario_rows": [
     {
-      "scenario_id": 130001,
-      "change_id": 73001,
-      "scenario_name": "현행 시설 배치",
-      "market_id": 1,
-      "virtual_config": {
-        "is_baseline": true,
-        "simulation_context": {
-          "analysis_date": "2026-07-21",
-          "simulation_start": "2026-08-15T17:00:00",
-          "simulation_end": "2026-08-15T22:00:00",
-          "expected_visitors": 2600,
-          "assumptions": [
-            "방문객 유입은 17시부터 증가해 19시 30분에 최고치에 도달한다.",
-            "점포와 고정 시설물의 위치는 시뮬레이션 기간 동안 변하지 않는다.",
-            "방문객은 혼잡 구역을 회피하되 목적지 선호를 유지한다.",
-            "결과는 동일 조건에서 20회 반복한 평균과 최대값을 사용한다."
-          ],
-          "model_version": "mesa-abm-mock-0.2",
-          "random_seed": 42,
-          "repetitions": 20,
-          "density_risk_threshold_p_m2": 6
-        }
-      },
-      "space_mod_data": {
-        "layout_version": "mock-layout-v1",
-        "interventions": []
-      },
-      "reg_datetime": "2026-07-21T09:00:00+09:00",
-      "agent_count": 2600,
-      "policy_type_code": "FACIL",
-      "created_at": "2026-07-21T09:00:00+09:00"
-    },
-    {
       "scenario_id": 130002,
-      "change_id": 73001,
       "scenario_name": "대안 A: 휴게공간 분산 배치",
       "market_id": 1,
       "virtual_config": {
-        "is_baseline": false,
+        "marketId": 1,
+        "agentCount": 2600,
+        "steps": 50,
+        "objects": [
+          {
+            "objectType": "food_truck",
+            "zoneId": 1,
+            "intensity": 0.5
+          },
+          {
+            "objectType": "food_truck",
+            "zoneId": 4,
+            "intensity": 0.5
+          }
+        ],
+        "corridorPolicies": [],
+        "events": [],
+        "closedGateIds": [],
         "simulation_context": {
           "analysis_date": "2026-07-21",
           "simulation_start": "2026-08-15T17:00:00",
@@ -72,39 +103,39 @@
           "repetitions": 20
         }
       },
-      "space_mod_data": {
-        "layout_version": "mock-layout-v1",
-        "interventions": [
-          {
-            "intervention_type": "one_way",
-            "target_zone": "중앙통로",
-            "description": "북문에서 남문 방향 일방통행 적용",
-            "parameters": {
-              "direction": "N_TO_S"
-            }
-          },
-          {
-            "intervention_type": "signage",
-            "target_zone": "북문·남문",
-            "description": "유도표지 4개 설치",
-            "parameters": {
-              "count": 4
-            }
-          }
-        ]
-      },
       "reg_datetime": "2026-07-21T09:00:00+09:00",
       "agent_count": 2600,
-      "policy_type_code": "FACIL",
+      "policy_type_code": "POLNO",
       "created_at": "2026-07-21T09:00:00+09:00"
     },
     {
       "scenario_id": 130003,
-      "change_id": 73001,
       "scenario_name": "대안 B: 보행약자 우선 재배치",
       "market_id": 1,
       "virtual_config": {
-        "is_baseline": false,
+        "marketId": 1,
+        "agentCount": 2600,
+        "steps": 50,
+        "objects": [
+          {
+            "objectType": "food_truck",
+            "zoneId": 4,
+            "intensity": 0.6
+          },
+          {
+            "objectType": "obstacle",
+            "zoneId": 2,
+            "intensity": 0.4
+          },
+          {
+            "objectType": "rest_area",
+            "zoneId": 3,
+            "intensity": 0.5
+          }
+        ],
+        "corridorPolicies": [],
+        "events": [],
+        "closedGateIds": [],
         "simulation_context": {
           "analysis_date": "2026-07-21",
           "simulation_start": "2026-08-15T17:00:00",
@@ -124,58 +155,13 @@
           "repetitions": 20
         }
       },
-      "space_mod_data": {
-        "layout_version": "mock-layout-v1",
-        "interventions": [
-          {
-            "intervention_type": "one_way",
-            "target_zone": "중앙통로",
-            "description": "북문에서 남문 방향 일방통행 적용",
-            "parameters": {
-              "direction": "N_TO_S"
-            }
-          },
-          {
-            "intervention_type": "gate_open",
-            "target_zone": "동문",
-            "description": "17~21시 임시 입구 운영",
-            "parameters": {
-              "open": "17:00",
-              "close": "21:00"
-            }
-          },
-          {
-            "intervention_type": "staffing",
-            "target_zone": "북문·동문",
-            "description": "안내요원 2명 배치",
-            "parameters": {
-              "count": 2
-            }
-          }
-        ]
-      },
       "reg_datetime": "2026-07-21T09:00:00+09:00",
       "agent_count": 2600,
-      "policy_type_code": "FACIL",
+      "policy_type_code": "POLNO",
       "created_at": "2026-07-21T09:00:00+09:00"
     }
   ],
   "result_rows": [
-    {
-      "result_id": 230001,
-      "scenario_id": 130001,
-      "predicted_max_density": 5.7,
-      "predicted_density": 2.8,
-      "predicted_risk_score": 78,
-      "economic_effect_analysis": null,
-      "generated_report_path": null,
-      "avg_stay_time": "PT39.0M",
-      "flow_direction": {
-        "mode": "existing",
-        "direction": "BIDIRECTIONAL"
-      },
-      "executed_at": "2026-08-15T22:00:00"
-    },
     {
       "result_id": 230002,
       "scenario_id": 130002,

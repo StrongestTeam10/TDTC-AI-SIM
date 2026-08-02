@@ -23,9 +23,24 @@ def test_build_report_request_from_erd_mock():
 
     request = build_report_request(bundle)
 
-    assert request.change_id == 71001
     assert request.baseline is not None
+    assert request.baseline.alternative_id == "110001"
     assert len(request.alternatives) >= 1
+
+    # 기준안은 대안 목록에 섞이지 않는다.
+    assert all(
+        alternative.alternative_id != "110001"
+        for alternative in request.alternatives
+    )
+
+    # 기준안은 비교의 출발점이라 변경사항이 비어 있어야 한다.
+    assert request.baseline.interventions == []
+
+    # 대안의 변경사항은 virtual_config에서 파생된다.
+    assert all(
+        alternative.interventions
+        for alternative in request.alternatives
+    )
 
     # 기준안의 시간대별 밀집도 결과가 변환됐는지 확인한다.
     assert len(
