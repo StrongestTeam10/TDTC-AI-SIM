@@ -16,7 +16,16 @@ from .report_models import MarketInfo
 class ReportMeta(BaseModel):
     """DB 결과와 분리해 보고서 생성 요청 시 전달하는 문서 메타데이터."""
 
-    report_id: str
+    # report_id는 출력 폴더명·파일명으로 그대로 쓰이므로 경로 문자를 허용하면 안 된다.
+    # ".."는 상위 폴더로 빠져나가고, 절대경로("/tmp/x")는 Path 결합 시 앞부분을 통째로
+    # 덮어써 REPORT_OUTPUT_DIR 밖에 파일을 쓰거나 읽게 된다.
+    # 영문·숫자·하이픈·밑줄만 허용해 입구에서 차단한다.
+    # (BE가 만드는 "RPT-MKT1-20260731-161044-9536" 형식은 이 규칙을 만족한다)
+    report_id: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
     report_title: str | None = None
     decision_question: str | None = None
 
