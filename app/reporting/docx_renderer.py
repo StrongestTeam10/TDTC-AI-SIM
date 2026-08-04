@@ -304,13 +304,29 @@ class DocxReportRenderer:
             *request.alternatives,
         ]
 
-        # 대피 인원과 최대 밀집 구역은 데이터가 있을 때만 열을 만든다.
-        # 대피는 화재·음향 이상 시나리오에서만 발생하므로, 무조건 열을 두면
-        # 통로 정책이나 오브젝트 배치 보고서에는 0과 "미산출"만 찬 열이 남는다.
-        # 시간대별 밀집도 차트가 데이터 없으면 통째로 생략되는 것과 같은 방식이다.
+        # 대피 인원과 최대 밀집 구역은 데이터가 있을 때만 열을 만든다. 통로 정책이나
+        # 오브젝트 배치 보고서에 0과 "미산출"만 찬 열이 남지 않게 하기 위함이다.
+        #
+        # 대피는 구역 위험도가 임계를 넘으면 일어나므로 화재·음향 이벤트가 없어도
+        # 혼잡만으로 발생할 수 있다. 그래서 값이 하나라도 양수면 이벤트 유무와
+        # 무관하게 보여준다. 반대로 이벤트를 상정했는데 대피가 0명인 것은 그 자체로
+        # 의미 있는 결과이므로, 값이 전부 0이어도 이벤트가 있으면 열을 남긴다.
+        has_event = any(
+            any(
+                intervention.intervention_type == "event_trigger"
+                for intervention in alternative.interventions
+            )
+            for alternative in request.alternatives
+        )
         has_evacuation = any(
-            (item.metrics.evacuated_count or 0) > 0
+            item.metrics.evacuated_count is not None
             for item in scenarios
+        ) and (
+            has_event
+            or any(
+                (item.metrics.evacuated_count or 0) > 0
+                for item in scenarios
+            )
         )
         has_density_zone = any(
             item.max_density_zone_name

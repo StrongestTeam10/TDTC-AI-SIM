@@ -670,6 +670,9 @@ def build_report_request(bundle: DbReportBundle) -> ReportRequest:
             bundle.baseline_result,
             bundle.density_timeseries_rows,
             is_baseline=True,
+            # 현행안도 최대 밀집 구역명을 보완하려면 zone_names가 필요하다. 개입 목록은
+            # 현행안에서 비워 두므로 예전에는 넘길 이유가 없었다.
+            zone_names=zone_names,
         ),
         alternatives=alternatives,
         # disclaimer는 ReportMeta에서 받지 않고 ReportRequest의 기본 문구를 쓴다.
