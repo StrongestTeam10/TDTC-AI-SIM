@@ -239,4 +239,10 @@ class PredictResult(BaseModel):
     pois: list[PoiState] = []
     riskTrend: list[RiskTrendPoint]
     finalOverallRiskScore: float
+    agentCount: int
+    averageDensity: float
+    maxDensity: float
+    maxDensityZoneId: int | None = None
+    maxDensityZoneName: str | None = None
+    evacuatedCount: int = 0
 
