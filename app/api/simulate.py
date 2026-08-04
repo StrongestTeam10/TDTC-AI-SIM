@@ -263,6 +263,24 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
         frames.append(_frame_agents(model))
         risk_trend.append(_risk_trend_point(model, step_index))
 
+    initial_count = sum(obs.visitor_count for obs in observations.values())
+    total_agent_count = initial_count + req.totalInflow
+
+    risk_by_zone = model.risk
+    if risk_by_zone:
+        densities = [r.density for r in risk_by_zone.values()]
+        average_density = sum(densities) / len(densities) if densities else 0.0
+        max_density_zone_id, max_density_assessment = max(
+            risk_by_zone.items(), key=lambda item: item[1].density
+        )
+        max_density = max_density_assessment.density
+        max_density_zone_name = layout.zones[max_density_zone_id].zone_name
+    else:
+        average_density = 0.0
+        max_density = 0.0
+        max_density_zone_id = None
+        max_density_zone_name = None
+
     final_overall = risk_trend[-1].overallRiskScore if risk_trend else 0.0
 
     return PredictResult(
@@ -271,4 +289,10 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
         frames=frames,
         riskTrend=risk_trend,
         finalOverallRiskScore=final_overall,
+        agentCount=total_agent_count,
+        averageDensity=average_density,
+        maxDensity=max_density,
+        maxDensityZoneId=max_density_zone_id,
+        maxDensityZoneName=max_density_zone_name,
+        evacuatedCount=model.evacuated_count,
     )
