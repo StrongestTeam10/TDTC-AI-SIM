@@ -81,6 +81,24 @@ def fetch_stalls(market_id: int) -> list[dict]:
         return cur.fetchall()
 
 
+def fetch_buildings(market_id: int) -> list[dict]:
+    """
+    2026-08-XX 추가: 상가/건물 폴리곤(MRKBLDG01M). 원래 지도에 3D 느낌으로
+    표시하는 용도로만 BE/FE에 연결돼 있었는데, SIM은 이 데이터를 몰라서
+    에이전트가 시장 구역 폴리곤(남측/중앙/북측 등) 전체를 걸어다닐 수 있는
+    것으로 취급해 상가 건물 자리까지 그냥 통과할 수 있었다. 이제 이동 경로
+    계산(walkable_area)에서 건물이 차지하는 실제 모양을 빼서, 에이전트가
+    건물 사이 통로로만 다니게 하는 데 쓴다.
+    """
+    with get_cursor() as cur:
+        cur.execute(
+            "SELECT pnu_code, polygon_coordinates "
+            "FROM mrkbldg01m WHERE market_id = %s",
+            (market_id,),
+        )
+        return cur.fetchall()
+
+
 def fetch_latest_pedestrian_frames(market_id: int, captured_at: datetime | None = None) -> list[dict]:
     """
     구역별 CCTV 프레임 좌표 1건을 조회한다.

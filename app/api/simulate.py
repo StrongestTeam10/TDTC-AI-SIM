@@ -49,7 +49,8 @@ def _load_layout(market_id: int) -> MarketLayout:
     adjacency = repo.fetch_adjacency(market_id)
     gates = repo.fetch_gates(market_id)
     stalls = repo.fetch_stalls(market_id)
-    return MarketLayout.from_db_rows(market, zones, adjacency, gates, stalls)
+    buildings = repo.fetch_buildings(market_id)
+    return MarketLayout.from_db_rows(market, zones, adjacency, gates, stalls, buildings)
 
 
 @router.post("/snapshot", response_model=SnapshotResponse)
@@ -257,6 +258,13 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
     frames: list[list[dict]] = []
     risk_trend: list[RiskTrendPoint] = []
     for step_index in range(req.steps):
+        # 2026-08-XX 추가: 화재/음향이상 이벤트를 지정된 triggerStep에 발동시킨다.
+        # simulate_scenario()의 이벤트 발동 루프와 동일한 로직.
+        current_step_number = step_index + 1
+        due_events = [e for e in req.events if e.triggerStep == current_step_number]
+        if due_events:
+            apply_event_triggers(model, due_events)
+
         if inflow_schedule[step_index] > 0:
             model.inject_inflow(inflow_schedule[step_index])
         model.step()

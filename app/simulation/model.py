@@ -109,8 +109,10 @@ class MarketLayout:
         adjacency_rows: list[dict],
         gate_rows: list[dict],
         stall_rows: list[dict] | None = None,
+        building_rows: list[dict] | None = None,
     ) -> "MarketLayout":
         stall_rows = stall_rows or []
+        building_rows = building_rows or []
         projection = LocalProjection(
             origin_lat=float(market_row["latitude"]),
             origin_lon=float(market_row["longitude"]),
@@ -186,6 +188,23 @@ class MarketLayout:
 
         walkable_area = unary_union([z.polygon_local for z in zones.values()])
 
+        # 2026-08-XX 추가: 상가/건물(mrkbldg01m)이 실제로 차지하는 모양을
+        # 걸어다닐 수 있는 영역에서 빼서, 에이전트가 건물 자리를 그냥 통과하지
+        # 못하고 건물 사이 시장 통로로만 다니게 한다. 예전엔 구역 폴리곤
+        # 전체(남측/중앙/북측 등)를 통째로 걸어다닐 수 있는 것으로 취급해서,
+        # 매대(작은 원형 장애물)만 빼고 건물은 전혀 반영이 안 됐었다.
+        building_polygons: list[Polygon] = []
+        for row in building_rows:
+            try:
+                poly_wgs = parse_polygon(row["polygon_coordinates"])
+                building_polygons.append(projection.polygon_to_local(poly_wgs))
+            except Exception:
+                # 좌표 파싱 실패한 건물 하나 때문에 전체 레이아웃 로드가
+                # 죽으면 안 되니, 그 건물만 건너뛴다.
+                continue
+        if building_polygons:
+            walkable_area = walkable_area.difference(unary_union(building_polygons))
+
         obstacles: list[tuple[float, float, float]] = []
         for row in stall_rows:
             if row.get("latitude") is None or row.get("longitude") is None:
@@ -233,26 +252,16 @@ class MarketLayout:
         return layout
 
 
-FOOD_TRUCK_ATTRACTION = 6.0
-EVENT_ZONE_ATTRACTION = 9.0
-REST_AREA_ATTRACTION = 2.5
-OBSTACLE_BASE_RADIUS_M = 1.5
+FOOD_TRUCK_RADIUS_M = 2.0     # 1톤트럭(포터/봉고) 전폭1.74m×전장5.2m 실측 근거
+EVENT_ZONE_RADIUS_M = 1.7     # 표준 부스/몽골텐트 3x3m 실측 근거
+REST_AREA_RADIUS_M = 1.3      # 파라솔+테이블+의자 실측 근거
+OBSTACLE_BASE_RADIUS_M = 0.5  # 소형 적재물/표지판 기준
 
 CONGESTION_ATTRACTION_DECAY = 3.0
 """2026-07-27 추가: 구역이 혼잡할수록(명/m^2) 매력도가 체감하는 정도를 조절하는
 계수. attraction_of()에서 base_attraction / (1 + density * 이 값) 형태로 적용된다.
-값이 클수록 조금만 붐벼도 매력도가 빨리 깎인다(임의 튜닝값)."""
-
-
-def _saturating_attraction(base_weight: float, intensity: float) -> float:
-    """
-    2026-07-27 변경: 오브젝트 강도(intensity)에 따른 매력도 증가를 선형이 아니라
-    포화 곡선(제곱근)으로 바꿨다. 이전엔 intensity가 늘어난 만큼 매력도가 그대로
-    비례해서 늘었는데, 실제로는 "이미 충분히 눈에 띄는 오브젝트"가 강도를 더
-    올린다고 그만큼 더 매력적이지는 않다는 점을 반영한 것 - 강도 0.5에서 1.0으로
-    올려도 효과 증가폭이 처음보다 완만해진다(임의 튜닝, sqrt 곡선).
-    """
-    return base_weight * math.sqrt(max(intensity, 0.0))
+값이 클수록 조금만 붐벼도 매력도가 빨리 깎인다(임의 튜닝값). 이 값은 시장 구역
+자체의 기본 매력도(DB의 zone.attraction)에만 쓰이며, PlacedObject와는 무관하다."""
 
 
 def apply_scenario_overrides(
@@ -260,7 +269,20 @@ def apply_scenario_overrides(
     objects: list[PlacedObject],
     corridor_policies: list[CorridorPolicy],
 ) -> None:
+    """
+    2026-08-02 변경: PlacedObject의 매력도(attraction) 부여 로직을 전면 제거했다.
+    이제 food_truck/event_zone/rest_area/obstacle 네 타입 전부 동일하게
+    "사람을 끌어당기지 않고, 그 자리를 물리적으로 못 지나가게만 만드는" 장애물로
+    취급한다. 화재/대피 상황에서도 그냥 회피 대상 장애물로 작동한다.
+    """
     extra_obstacles: list[tuple[float, float, float]] = []
+
+    radius_by_type: dict[str, float] = {
+        "food_truck": FOOD_TRUCK_RADIUS_M,
+        "event_zone": EVENT_ZONE_RADIUS_M,
+        "rest_area": REST_AREA_RADIUS_M,
+        "obstacle": OBSTACLE_BASE_RADIUS_M,
+    }
 
     for obj in objects:
         spec = layout.zones.get(obj.zoneId)
@@ -273,16 +295,12 @@ def apply_scenario_overrides(
             rp = spec.polygon_local.representative_point()
             lx, ly = rp.x, rp.y
 
-        if obj.objectType == "food_truck":
-            spec.attraction += _saturating_attraction(FOOD_TRUCK_ATTRACTION, obj.intensity)
-        elif obj.objectType == "event_zone":
-            spec.attraction += _saturating_attraction(EVENT_ZONE_ATTRACTION, obj.intensity)
-        elif obj.objectType == "rest_area":
-            spec.attraction += _saturating_attraction(REST_AREA_ATTRACTION, obj.intensity)
-        elif obj.objectType == "obstacle":
-            radius = OBSTACLE_BASE_RADIUS_M * (0.5 + obj.intensity)
-            extra_obstacles.append((lx, ly, radius))
-            spec.attraction = max(0.0, spec.attraction - EVENT_ZONE_ATTRACTION * obj.intensity * 0.3)
+        base_radius = radius_by_type.get(obj.objectType)
+        if base_radius is None:
+            continue
+
+        radius = base_radius * (0.5 + obj.intensity)
+        extra_obstacles.append((lx, ly, radius))
 
     if extra_obstacles:
         layout.walkable_grid = WalkableGrid.build(
@@ -426,7 +444,7 @@ class MarketDigitalTwin(Model):
             return list(self.pois)
         weights = [poi.get("weight", 1.0) for poi in self.pois]
         return self._rng.choices(self.pois, weights=weights, k=count)
-        
+
     def get_pois_near(self, x: float, y: float, radius: float) -> list[dict]:
         near = []
         for p in self.pois:
@@ -434,7 +452,7 @@ class MarketDigitalTwin(Model):
             if dist <= radius:
                 near.append(p)
         return near
-        
+
     def count_agents_near(self, x: float, y: float, radius_m: float) -> int:
         count = 0
         for agent in self.agents:
