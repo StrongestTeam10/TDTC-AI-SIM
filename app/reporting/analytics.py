@@ -13,16 +13,22 @@ METRIC_LABELS = {
     "avg_density_p_m2": "평균 밀집도(명/㎡)",
     "risk_score": "예측 위험점수(점)",
     "avg_dwell_time_min": "평균 체류시간(분)",
+    "evacuated_count": "대피 인원(명)",
 }
 
 
 # 값이 낮아졌을 때 안전 측면에서 개선으로 해석할 수 있는 지표
 # 평균 체류시간은 정책 목적에 따라 의미가 달라지므로 자동 평가하지 않는다.
+#
+# 대피 인원도 자동 평가하지 않는다. 줄어든 것이 "덜 위험해졌다"는 뜻일 수도,
+# "위험을 감지하지 못했다"는 뜻일 수도 있어 방향만으로 개선 여부를 단정할 수 없다.
+# 판단은 보고서를 읽는 담당자의 몫으로 남긴다.
 LOWER_IS_BETTER = {
     "max_density_p_m2": True,
     "avg_density_p_m2": True,
     "risk_score": True,
     "avg_dwell_time_min": None,
+    "evacuated_count": None,
 }
 
 

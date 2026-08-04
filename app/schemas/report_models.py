@@ -61,6 +61,10 @@ class MetricSet(BaseModel):
     risk_score: float | None = Field(default=None, ge=0)
     avg_dwell_time_min: float | None = Field(default=None, ge=0)
 
+    # 2026-08-03 추가. 시뮬레이션 중 대피 상태로 전환된 방문객 수.
+    # 화재·음향 이벤트의 직접적 효과라 기준안과 비교할 가치가 있다.
+    evacuated_count: int | None = Field(default=None, ge=0)
+
 
 class DensityTimePoint(BaseModel):
     """시뮬레이션 경과시간별 밀집도 예측값."""
@@ -89,6 +93,11 @@ class AlternativeResult(BaseModel):
     economic_effect_analysis: str | None = None
     result_id: int | None = None
     executed_at: datetime | None = None
+
+    # 2026-08-03 추가. 최대 밀집도가 발생한 구역. 수치가 아니라 지목용 이름이므로
+    # MetricSet(변화량 비교 대상)이 아니라 여기에 둔다.
+    max_density_zone_id: int | None = None
+    max_density_zone_name: str | None = None
 
 
 class EvidenceItem(BaseModel):

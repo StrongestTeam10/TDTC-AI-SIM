@@ -299,11 +299,23 @@ class DocxReportRenderer:
             1,
         )
 
-        table = document.add_table(
-            rows=1,
-            cols=4,
+        scenarios = [
+            request.baseline,
+            *request.alternatives,
+        ]
+
+        # 대피 인원과 최대 밀집 구역은 데이터가 있을 때만 열을 만든다.
+        # 대피는 화재·음향 이상 시나리오에서만 발생하므로, 무조건 열을 두면
+        # 통로 정책이나 오브젝트 배치 보고서에는 0과 "미산출"만 찬 열이 남는다.
+        # 시간대별 밀집도 차트가 데이터 없으면 통째로 생략되는 것과 같은 방식이다.
+        has_evacuation = any(
+            (item.metrics.evacuated_count or 0) > 0
+            for item in scenarios
         )
-        table.style = "Table Grid"
+        has_density_zone = any(
+            item.max_density_zone_name
+            for item in scenarios
+        )
 
         headers = [
             "시나리오",
@@ -311,6 +323,16 @@ class DocxReportRenderer:
             "평균 밀집도",
             "위험점수",
         ]
+        if has_density_zone:
+            headers.append("최대 밀집 구역")
+        if has_evacuation:
+            headers.append("대피 인원")
+
+        table = document.add_table(
+            rows=1,
+            cols=len(headers),
+        )
+        table.style = "Table Grid"
 
         for cell, header in zip(
             table.rows[0].cells,
@@ -326,11 +348,6 @@ class DocxReportRenderer:
                 "D9E5F6",
             )
 
-        scenarios = [
-            request.baseline,
-            *request.alternatives,
-        ]
-
         for alternative in scenarios:
             metrics = alternative.metrics
 
@@ -340,6 +357,12 @@ class DocxReportRenderer:
                 self._fmt(metrics.avg_density_p_m2),
                 self._fmt(metrics.risk_score, 0),
             ]
+            if has_density_zone:
+                values.append(
+                    alternative.max_density_zone_name or "미산출"
+                )
+            if has_evacuation:
+                values.append(self._fmt(metrics.evacuated_count))
 
             cells = table.add_row().cells
 

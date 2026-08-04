@@ -76,6 +76,12 @@ class ScenarioResultRow(BaseModel):
     flow_direction: dict[str, Any] | list[Any] | str | None = None
     executed_at: datetime
 
+    # 2026-08-03 추가. 보고서 기능 도입 전에 저장된 행에는 없을 수 있으므로 전부 선택값이다.
+    # 화재·음향 이벤트 시나리오에서 정책 효과가 실제로 드러나는 지표다.
+    evacuated_count: int | None = Field(default=None, ge=0)
+    max_density_zone_id: int | None = None
+    max_density_zone_name: str | None = None
+
 
 class DensityTimeSeriesRow(BaseModel):
     """시간대별 밀집도 결과 상세 테이블 조회 행."""

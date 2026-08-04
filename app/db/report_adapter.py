@@ -427,6 +427,14 @@ def _to_alternative(
             avg_density_p_m2=result.predicted_density,
             risk_score=result.predicted_risk_score,
             avg_dwell_time_min=_duration_to_minutes(result.avg_stay_time),
+            evacuated_count=result.evacuated_count,
+        ),
+        max_density_zone_id=result.max_density_zone_id,
+        # 구역명은 결과 행에 있으면 그대로 쓰고, 없으면 zone_names로 보완한다.
+        # 보고서 기능 도입 전에 저장된 행은 이름 없이 id만 들고 있을 수 있다.
+        max_density_zone_name=(
+            result.max_density_zone_name
+            or (zone_names or {}).get(result.max_density_zone_id)
         ),
         density_timeseries=[
             DensityTimePoint(
