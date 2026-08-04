@@ -12,7 +12,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .analytics import AlternativeAssessment
-from app.schemas.report_models import EvidenceItem, ReportRequest
+from app.schemas.report_models import (
+    EvidenceItem,
+    Intervention,
+    ReportRequest,
+)
 
 
 @dataclass
@@ -386,6 +390,133 @@ class NarrativeGenerator:
         )
 
     @staticmethod
+    def _trigger_steps(intervention: Intervention) -> list[int]:
+        """개입 parameters에서 발동 스텝을 꺼낸다.
+
+        _merge_duplicates()가 같은 설명의 이벤트를 묶으면 parameters가
+        {"items": [원본, ...]} 형태로 바뀌므로 두 모양을 모두 처리한다.
+        """
+
+        params = intervention.parameters or {}
+        raw = params.get("items")
+        candidates = raw if isinstance(raw, list) else [params]
+
+        steps: list[int] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            step = item.get("triggerStep")
+            if isinstance(step, int) and step not in steps:
+                steps.append(step)
+        return sorted(steps)
+
+    @classmethod
+    def _template_emergency_response(
+        cls,
+        request: ReportRequest,
+        assessments: list[AlternativeAssessment],
+    ) -> list[str]:
+        """위험 이벤트가 상정된 시나리오에 한해 대응 검토 항목을 만든다.
+
+        전달받은 값만 사용하고 대응 조치를 새로 지어내지 않는다. 시뮬레이션이
+        산출한 결과(대피 인원, 최대 밀집 구역, 위험점수 변화)와 시나리오에
+        실제로 들어 있는 이벤트 설정만 문장으로 옮긴다.
+        """
+
+        deltas_by_id = {
+            assessment.alternative_id: {
+                delta.key: delta
+                for delta in assessment.deltas
+            }
+            for assessment in assessments
+        }
+
+        baseline_evacuated = request.baseline.metrics.evacuated_count
+        bullets: list[str] = []
+        has_event = False
+
+        for alternative in request.alternatives:
+            events = [
+                item
+                for item in alternative.interventions
+                if item.intervention_type == "event_trigger"
+            ]
+            if not events:
+                continue
+            has_event = True
+
+            prefix = (
+                f"{alternative.alternative_name}: "
+                if len(request.alternatives) > 1
+                else ""
+            )
+
+            summary = ", ".join(item.description for item in events)
+            steps = sorted(
+                {
+                    step
+                    for item in events
+                    for step in cls._trigger_steps(item)
+                }
+            )
+            if steps:
+                step_text = ", ".join(f"{step}스텝" for step in steps)
+                summary += f" (발동 시점: {step_text})"
+            bullets.append(f"{prefix}상정된 위험 이벤트 — {summary}")
+
+            evacuated = alternative.metrics.evacuated_count
+            if evacuated is not None:
+                if baseline_evacuated is not None:
+                    bullets.append(
+                        f"{prefix}이 조건에서 대피 상태로 전환된 방문객은 "
+                        f"{evacuated}명으로, 현행안 {baseline_evacuated}명과 비교된다. "
+                        "대피 인원의 증감만으로는 안전성 개선 여부를 판단할 수 없으므로 "
+                        "아래 밀집·위험 지표와 함께 검토한다."
+                    )
+                else:
+                    bullets.append(
+                        f"{prefix}이 조건에서 대피 상태로 전환된 방문객은 "
+                        f"{evacuated}명이다."
+                    )
+
+            if alternative.max_density_zone_name:
+                bullets.append(
+                    f"{prefix}대피 과정에서 최대 밀집도가 관측된 구역은 "
+                    f"{alternative.max_density_zone_name}이다. "
+                    "해당 구역의 통로 폭과 출입구 접근성을 우선 점검 대상으로 둔다."
+                )
+
+            risk_delta = deltas_by_id.get(
+                alternative.alternative_id, {}
+            ).get("risk_score")
+            if (
+                risk_delta is not None
+                and risk_delta.percent is not None
+            ):
+                direction = (
+                    "낮아졌다"
+                    if risk_delta.percent < 0
+                    else "높아졌다"
+                )
+                bullets.append(
+                    f"{prefix}이벤트를 포함한 조건의 예측 위험점수는 현행안 대비 "
+                    f"{abs(risk_delta.percent):.1f}% {direction}"
+                    f"({risk_delta.baseline} → {risk_delta.candidate})."
+                )
+
+        if not has_event:
+            return []
+
+        bullets.append(
+            "본 시뮬레이션은 화재의 인접 구역 확산과 음향의 거리별 감쇠를 "
+            "모델링하지 않는다. 화재는 발생 구역의 위험도를 높은 값으로 "
+            "고정하고, 음향 이상은 지정 반경 안의 방문객을 한 차례 대피시키는 "
+            "방식으로 반영된다. 따라서 위 수치는 실제 확산 양상이 아니라 "
+            "해당 조건에서의 대피 흐름을 나타낸다."
+        )
+        return bullets
+
+    @staticmethod
     def _delta_sentences(
         assessment: AlternativeAssessment,
     ) -> list[str]:
@@ -422,8 +553,12 @@ class NarrativeGenerator:
     ) -> Narrative:
         comparison_summaries: list[str] = []
         for assessment in assessments:
+            # 상한을 두지 않는다. _delta_sentences()가 기준안·대안 중 한쪽이라도
+            # 값이 없는 지표를 이미 걸러내므로, 남은 것은 전부 실제로 산출된 지표다.
+            # (예전에는 앞 3개만 썼는데, 지표가 늘면서 대피 인원처럼 뒤에 등록된
+            #  항목이 조용히 잘려나갔다.)
             delta_text = " ".join(
-                self._delta_sentences(assessment)[:3]
+                self._delta_sentences(assessment)
             )
             if delta_text:
                 comparison_summaries.append(
@@ -503,6 +638,10 @@ class NarrativeGenerator:
             evidence_notes=self._fallback_evidence_notes(
                 evidence
             ),
+            emergency_response=self._template_emergency_response(
+                request,
+                assessments,
+            ),
         )
 
     def _generate_with_openai(
@@ -535,7 +674,7 @@ class NarrativeGenerator:
             "retrieved_evidence와 facts에 없는 수치·법령·효과를 만들지 않는다. "
             "응답은 report_title, executive_summary, current_issue, "
             "recommendation_rationale, implementation_plan, limitations, "
-            "flow_analysis, evidence_notes 키를 "
+            "flow_analysis, evidence_notes, emergency_response 키를 "
             "가진 JSON 객체만 출력한다. report_title은 시장명과 검토 정책을 "
             "드러내는 50자 이내의 공공 보고서 제목으로 작성하되, 결과 수치나 "
             "특정 대안의 우수성을 제목에서 단정하지 않는다. "
@@ -554,7 +693,12 @@ class NarrativeGenerator:
             "포함하는 객체 배열로 작성한다. 각 객체는 source_id와 summary "
             "키를 가지며, summary에는 해당 근거의 핵심 내용과 이번 정책 "
             "검토에 활용되는 이유를 1~2문장으로 설명한다. 수식이나 원문을 "
-            "그대로 복사하지 말고 retrieved_evidence에 없는 내용을 만들지 않는다."
+            "그대로 복사하지 말고 retrieved_evidence에 없는 내용을 만들지 않는다. "
+            "emergency_response는 문자열 배열로 작성한다. facts의 어느 대안에도 "
+            "intervention_type이 event_trigger인 항목이 없으면 반드시 빈 배열을 "
+            "반환한다. 있을 때만 상정된 이벤트, 대피 인원, 최대 밀집 구역, "
+            "위험점수 변화를 근거로 담당자가 점검할 사항을 작성하되, 시뮬레이션이 "
+            "산출하지 않은 대응 절차나 법정 기준을 지어내지 않는다."
         )
         response = OpenAI().chat.completions.create(
             model=os.getenv(
@@ -617,7 +761,42 @@ class NarrativeGenerator:
                 payload.get("evidence_notes"),
                 evidence,
             ),
+            # LLM이 이 키를 빠뜨리거나 형식을 어겨도 이벤트가 있는 시나리오에서는
+            # 절이 사라지지 않도록, 전달받은 값에서 직접 만든 템플릿 결과를
+            # 바닥으로 깐다. 반대로 이벤트가 없으면 템플릿도 빈 목록이므로
+            # LLM이 지어낸 대응 방안이 섞여 들어가지 않는다.
+            emergency_response=self._normalize_emergency_response(
+                payload.get("emergency_response"),
+                request,
+                assessments,
+            ),
         )
+
+    def _normalize_emergency_response(
+        self,
+        value: Any,
+        request: ReportRequest,
+        assessments: list[AlternativeAssessment],
+    ) -> list[str]:
+        """LLM의 위험 이벤트 대응 항목을 검증하고 필요하면 템플릿으로 대체한다."""
+
+        fallback = self._template_emergency_response(
+            request,
+            assessments,
+        )
+        if not fallback:
+            # 상정된 이벤트가 없는 시나리오. LLM이 무엇을 반환했든 절을 만들지 않는다.
+            return []
+
+        if value is None:
+            return fallback
+        try:
+            return self._normalize_string_list(
+                value,
+                "emergency_response",
+            )
+        except (TypeError, ValueError):
+            return fallback
 
     def status(self) -> dict[str, Any]:
         return {

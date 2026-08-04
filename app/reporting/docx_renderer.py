@@ -299,11 +299,39 @@ class DocxReportRenderer:
             1,
         )
 
-        table = document.add_table(
-            rows=1,
-            cols=4,
+        scenarios = [
+            request.baseline,
+            *request.alternatives,
+        ]
+
+        # 대피 인원과 최대 밀집 구역은 데이터가 있을 때만 열을 만든다. 통로 정책이나
+        # 오브젝트 배치 보고서에 0과 "미산출"만 찬 열이 남지 않게 하기 위함이다.
+        #
+        # 대피는 구역 위험도가 임계를 넘으면 일어나므로 화재·음향 이벤트가 없어도
+        # 혼잡만으로 발생할 수 있다. 그래서 값이 하나라도 양수면 이벤트 유무와
+        # 무관하게 보여준다. 반대로 이벤트를 상정했는데 대피가 0명인 것은 그 자체로
+        # 의미 있는 결과이므로, 값이 전부 0이어도 이벤트가 있으면 열을 남긴다.
+        has_event = any(
+            any(
+                intervention.intervention_type == "event_trigger"
+                for intervention in alternative.interventions
+            )
+            for alternative in request.alternatives
         )
-        table.style = "Table Grid"
+        has_evacuation = any(
+            item.metrics.evacuated_count is not None
+            for item in scenarios
+        ) and (
+            has_event
+            or any(
+                (item.metrics.evacuated_count or 0) > 0
+                for item in scenarios
+            )
+        )
+        has_density_zone = any(
+            item.max_density_zone_name
+            for item in scenarios
+        )
 
         headers = [
             "시나리오",
@@ -311,6 +339,16 @@ class DocxReportRenderer:
             "평균 밀집도",
             "위험점수",
         ]
+        if has_density_zone:
+            headers.append("최대 밀집 구역")
+        if has_evacuation:
+            headers.append("대피 인원")
+
+        table = document.add_table(
+            rows=1,
+            cols=len(headers),
+        )
+        table.style = "Table Grid"
 
         for cell, header in zip(
             table.rows[0].cells,
@@ -326,11 +364,6 @@ class DocxReportRenderer:
                 "D9E5F6",
             )
 
-        scenarios = [
-            request.baseline,
-            *request.alternatives,
-        ]
-
         for alternative in scenarios:
             metrics = alternative.metrics
 
@@ -340,6 +373,12 @@ class DocxReportRenderer:
                 self._fmt(metrics.avg_density_p_m2),
                 self._fmt(metrics.risk_score, 0),
             ]
+            if has_density_zone:
+                values.append(
+                    alternative.max_density_zone_name or "미산출"
+                )
+            if has_evacuation:
+                values.append(self._fmt(metrics.evacuated_count))
 
             cells = table.add_row().cells
 
