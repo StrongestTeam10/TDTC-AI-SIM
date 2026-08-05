@@ -49,7 +49,10 @@ def _load_layout(market_id: int) -> MarketLayout:
     adjacency = repo.fetch_adjacency(market_id)
     gates = repo.fetch_gates(market_id)
     stalls = repo.fetch_stalls(market_id)
-    buildings = repo.fetch_buildings(market_id)
+    # 2026-08-XX 변경: 이동 가능 영역을 이제 통로 좌표(mrkadjc01m) 기반으로
+    # 계산해서, 건물 데이터는 더 이상 여기서 안 쓴다(model.py 참고). 건물은
+    # 지도 표시(FE)용으로만 BE의 /buildings API를 통해 쓰인다.
+    return MarketLayout.from_db_rows(market, zones, adjacency, gates, stalls)
     return MarketLayout.from_db_rows(market, zones, adjacency, gates, stalls, buildings)
 
 

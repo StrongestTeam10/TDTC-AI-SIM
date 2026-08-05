@@ -15,7 +15,7 @@ from enum import Enum
 
 import networkx as nx
 from mesa import Model
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from app.schemas.models import CorridorPolicy, EventTrigger, PlacedObject
@@ -42,6 +42,10 @@ class SimulationMode(str, Enum):
 DEFAULT_FACILITY_RADIUS_M = 1.2
 """시설(매대 등)의 물리적 점유 반경 기본값(m). 실제 크기 데이터
 (mrkfcts01m.footprint_radius_m)가 없을 때 쓰는 임시 근사치."""
+
+DEFAULT_CORRIDOR_WIDTH_M = 4.0
+"""2026-08-XX 추가: 통로 폭(mrkadjc01m.path_width)이 비어있을 때 쓰는 기본값(m).
+전통시장 골목 실측 폭 참고."""
 
 
 @dataclass
@@ -109,10 +113,8 @@ class MarketLayout:
         adjacency_rows: list[dict],
         gate_rows: list[dict],
         stall_rows: list[dict] | None = None,
-        building_rows: list[dict] | None = None,
     ) -> "MarketLayout":
         stall_rows = stall_rows or []
-        building_rows = building_rows or []
         projection = LocalProjection(
             origin_lat=float(market_row["latitude"]),
             origin_lon=float(market_row["longitude"]),
@@ -186,24 +188,33 @@ class MarketLayout:
                 path_width=float(row.get("path_width") or 0.0),
             )
 
-        walkable_area = unary_union([z.polygon_local for z in zones.values()])
-
-        # 2026-08-XX 추가: 상가/건물(mrkbldg01m)이 실제로 차지하는 모양을
-        # 걸어다닐 수 있는 영역에서 빼서, 에이전트가 건물 자리를 그냥 통과하지
-        # 못하고 건물 사이 시장 통로로만 다니게 한다. 예전엔 구역 폴리곤
-        # 전체(남측/중앙/북측 등)를 통째로 걸어다닐 수 있는 것으로 취급해서,
-        # 매대(작은 원형 장애물)만 빼고 건물은 전혀 반영이 안 됐었다.
-        building_polygons: list[Polygon] = []
-        for row in building_rows:
-            try:
-                poly_wgs = parse_polygon(row["polygon_coordinates"])
-                building_polygons.append(projection.polygon_to_local(poly_wgs))
-            except Exception:
-                # 좌표 파싱 실패한 건물 하나 때문에 전체 레이아웃 로드가
-                # 죽으면 안 되니, 그 건물만 건너뛴다.
+        # 2026-08-XX 변경: "구역 폴리곤 전체 - 건물"로 걸어다닐 영역을 역산하던
+        # 방식을 버리고, 시장 통로(mrkadjc01m.path_coordinates) 중심선에 실제
+        # 통로 폭(path_width)만큼 버퍼를 씌운 모양을 그대로 걸어다닐 수 있는
+        # 영역으로 쓴다. 건물 데이터 정확도에 안 휘둘리고, "정말 길인 곳만"
+        # 걷게 되므로 더 안정적이다. 통로 데이터가 하나도 없으면(레이아웃이
+        # 아직 안 갖춰진 시장 등) 구역 폴리곤 전체로 폴백한다.
+        corridor_shapes: list[Polygon] = []
+        for row in adjacency_rows:
+            path_coordinates = row.get("path_coordinates")
+            if not path_coordinates:
                 continue
-        if building_polygons:
-            walkable_area = walkable_area.difference(unary_union(building_polygons))
+            try:
+                line_wgs = parse_linestring(path_coordinates)
+                line_local_points = [
+                    projection.to_local(lat, lon) for lon, lat in line_wgs.coords
+                ]
+                width = float(row.get("path_width") or DEFAULT_CORRIDOR_WIDTH_M)
+                corridor_shapes.append(
+                    LineString(line_local_points).buffer(width / 2, cap_style="flat")
+                )
+            except Exception:
+                continue
+
+        if corridor_shapes:
+            walkable_area = unary_union(corridor_shapes)
+        else:
+            walkable_area = unary_union([z.polygon_local for z in zones.values()])
 
         obstacles: list[tuple[float, float, float]] = []
         for row in stall_rows:
@@ -364,7 +375,13 @@ ACOUSTIC_INTENSITY_RADIUS_M = 15.0
 
 def apply_event_triggers(model: MarketDigitalTwin, events: list[EventTrigger]) -> None:
     """
-    2026-07-25 추가: 화재/음향 이상 이벤트를 이번 시뮬레이션 실행에 반영한다.
+    2026-07-25 추가, 2026-08-XX 변경: 화재/음향 이상 이벤트를 이번 시뮬레이션
+    실행에 반영한다.
+
+    2026-08-XX 변경: 화재가 나면 발생 구역만이 아니라 시장 전체가 대피 대상이
+    된다(model.forced_evacuation_zones에 전체 구역 등록) - "화재나면 일단
+    모두 대피"가 자연스럽다는 판단. 강제 위험도 점수(색상 진하기)는 화재
+    발생 구역에만 부여한다.
 
     model이 이미 만들어져 에이전트가 스폰된 뒤에 호출해야 한다(음향 이상은
     그 시점의 에이전트 좌표를 기준으로 반경 판정을 하기 때문). 좌표 정밀도는
@@ -386,6 +403,7 @@ def apply_event_triggers(model: MarketDigitalTwin, events: list[EventTrigger]) -
         if event.eventType == "fire":
             forced_score = FIRE_BASE_SCORE + FIRE_INTENSITY_RANGE * event.intensity
             model.set_forced_risk(event.zoneId, forced_score)
+            model.forced_evacuation_zones.update(layout.zones.keys())
         elif event.eventType == "acoustic_anomaly":
             radius = ACOUSTIC_BASE_RADIUS_M + ACOUSTIC_INTENSITY_RADIUS_M * event.intensity
             model.apply_acoustic_burst(ex, ey, radius)
@@ -424,6 +442,11 @@ class MarketDigitalTwin(Model):
         # 2026-07-25 추가: 화재 이벤트로 실측 밀집도와 무관하게 강제로 끌어올린
         # 구역별 위험도. set_forced_risk()로 채워지고 evaluate_risk()가 반영한다.
         self.forced_risk: dict[int, float] = {}
+
+        # 2026-08-XX 추가: 화재가 나면 개인별 risk_tolerance와 무관하게
+        # 무조건 대피해야 하는 구역 집합. apply_event_triggers()가 채우고,
+        # VisitorAgent.step()이 확인한다.
+        self.forced_evacuation_zones: set[int] = set()
 
 
         self.pois: list[dict] = self.layout.pois
@@ -636,15 +659,58 @@ class MarketDigitalTwin(Model):
     def build_path(
         self, from_x: float, from_y: float, to_x: float, to_y: float, arrive_zone: int | None
     ) -> list[tuple[float, float, int | None]]:
+        """
+        2026-08-XX: 경로를 못 찾으면(막다른 곳 등) 목적지까지 직선으로 뚫고
+        가지 않는다 - 이동 가능 영역이 이제 통로 모양 그대로라 더 자주 걸릴 수
+        있어서, 실패 시 목적지 근처에서 갈 수 있는 가장 가까운 지점까지만
+        경로를 잡는 폴백을 둔다(완전히 멈추지도, 벽을 뚫지도 않음).
+
+        또한 shortest_path()는 목적지 셀이 막혀 있으면 내부적으로 조용히
+        근처 셀로 스냅해서 성공 처리하는데, 그 경우에도 원래 요청 좌표가
+        아니라 실제 도달한 지점을 마지막 웨이포인트로 쓴다.
+        """
         grid = self.layout.walkable_grid
-        cell_path = grid.shortest_path(grid.to_cell(from_x, from_y), grid.to_cell(to_x, to_y))
+        start_cell = grid.to_cell(from_x, from_y)
+        goal_cell = grid.to_cell(to_x, to_y)
+
+        cell_path = grid.shortest_path(start_cell, goal_cell)
         if not cell_path or len(cell_path) < 2:
-            return [(to_x, to_y, arrive_zone)]
+            nearest = grid._nearest_walkable(goal_cell, max_radius=15)
+            if nearest is None or nearest == start_cell:
+                return []
+            fallback_path = grid.shortest_path(start_cell, nearest)
+            if not fallback_path or len(fallback_path) < 2:
+                return []
+            waypoints = [grid.to_point(c) for c in fallback_path[1:]]
+            return [(wx, wy, None) for wx, wy in waypoints]
 
         waypoints = [grid.to_point(c) for c in cell_path[1:-1]]
         path: list[tuple[float, float, int | None]] = [(wx, wy, None) for wx, wy in waypoints]
-        path.append((to_x, to_y, arrive_zone))
+
+        last_reached_x, last_reached_y = grid.to_point(cell_path[-1])
+        snap_distance = ((last_reached_x - to_x) ** 2 + (last_reached_y - to_y) ** 2) ** 0.5
+        if snap_distance <= grid.cell_size_m:
+            path.append((to_x, to_y, arrive_zone))
+        else:
+            path.append((last_reached_x, last_reached_y, arrive_zone))
         return path
+
+    def nearest_open_gate(self, x: float, y: float) -> dict | None:
+        """
+        2026-08-XX 추가: 대피 시 "구역을 한 칸씩 거쳐서 출구 구역까지 간 다음
+        그 구역의 게이트로" 가던 방식 대신, 지금 위치에서 직선거리 기준으로
+        가장 가까운 열린 게이트를 바로 목적지로 잡는다. 실제 걷는 경로는
+        build_path()가 통로망을 따라 알아서 찾아준다(직선거리는 "어느 게이트가
+        가까운지" 후보를 고르는 용도일 뿐, 실제 이동 경로가 직선이라는 뜻은
+        아니다). layout.gates는 apply_gate_closures()가 닫힌 게이트를 이미
+        제거한 상태라 여기 있는 건 전부 열려있는 게이트다.
+        """
+        if not self.layout.gates:
+            return None
+        return min(
+            self.layout.gates,
+            key=lambda g: (g["x"] - x) ** 2 + (g["y"] - y) ** 2,
+        )
 
     def inject_inflow(self, count: int) -> None:
         gates = [g for g in self.layout.gates if g.get("zone_id") is not None]
