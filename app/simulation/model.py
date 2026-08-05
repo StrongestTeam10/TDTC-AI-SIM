@@ -15,7 +15,7 @@ from enum import Enum
 
 import networkx as nx
 from mesa import Model
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from app.schemas.models import CorridorPolicy, EventTrigger, PlacedObject
@@ -42,6 +42,10 @@ class SimulationMode(str, Enum):
 DEFAULT_FACILITY_RADIUS_M = 1.2
 """시설(매대 등)의 물리적 점유 반경 기본값(m). 실제 크기 데이터
 (mrkfcts01m.footprint_radius_m)가 없을 때 쓰는 임시 근사치."""
+
+DEFAULT_CORRIDOR_WIDTH_M = 4.0
+"""2026-08-XX 추가: 통로 폭(mrkadjc01m.path_width)이 비어있을 때 쓰는 기본값(m).
+전통시장 골목 실측 폭 참고."""
 
 
 @dataclass
@@ -184,7 +188,33 @@ class MarketLayout:
                 path_width=float(row.get("path_width") or 0.0),
             )
 
-        walkable_area = unary_union([z.polygon_local for z in zones.values()])
+        # 2026-08-XX 변경: "구역 폴리곤 전체 - 건물"로 걸어다닐 영역을 역산하던
+        # 방식을 버리고, 시장 통로(mrkadjc01m.path_coordinates) 중심선에 실제
+        # 통로 폭(path_width)만큼 버퍼를 씌운 모양을 그대로 걸어다닐 수 있는
+        # 영역으로 쓴다. 건물 데이터 정확도에 안 휘둘리고, "정말 길인 곳만"
+        # 걷게 되므로 더 안정적이다. 통로 데이터가 하나도 없으면(레이아웃이
+        # 아직 안 갖춰진 시장 등) 구역 폴리곤 전체로 폴백한다.
+        corridor_shapes: list[Polygon] = []
+        for row in adjacency_rows:
+            path_coordinates = row.get("path_coordinates")
+            if not path_coordinates:
+                continue
+            try:
+                line_wgs = parse_linestring(path_coordinates)
+                line_local_points = [
+                    projection.to_local(lat, lon) for lon, lat in line_wgs.coords
+                ]
+                width = float(row.get("path_width") or DEFAULT_CORRIDOR_WIDTH_M)
+                corridor_shapes.append(
+                    LineString(line_local_points).buffer(width / 2, cap_style="flat")
+                )
+            except Exception:
+                continue
+
+        if corridor_shapes:
+            walkable_area = unary_union(corridor_shapes)
+        else:
+            walkable_area = unary_union([z.polygon_local for z in zones.values()])
 
         obstacles: list[tuple[float, float, float]] = []
         for row in stall_rows:
@@ -233,26 +263,16 @@ class MarketLayout:
         return layout
 
 
-FOOD_TRUCK_ATTRACTION = 6.0
-EVENT_ZONE_ATTRACTION = 9.0
-REST_AREA_ATTRACTION = 2.5
-OBSTACLE_BASE_RADIUS_M = 1.5
+FOOD_TRUCK_RADIUS_M = 2.0     # 1톤트럭(포터/봉고) 전폭1.74m×전장5.2m 실측 근거
+EVENT_ZONE_RADIUS_M = 1.7     # 표준 부스/몽골텐트 3x3m 실측 근거
+REST_AREA_RADIUS_M = 1.3      # 파라솔+테이블+의자 실측 근거
+OBSTACLE_BASE_RADIUS_M = 0.5  # 소형 적재물/표지판 기준
 
 CONGESTION_ATTRACTION_DECAY = 3.0
 """2026-07-27 추가: 구역이 혼잡할수록(명/m^2) 매력도가 체감하는 정도를 조절하는
 계수. attraction_of()에서 base_attraction / (1 + density * 이 값) 형태로 적용된다.
-값이 클수록 조금만 붐벼도 매력도가 빨리 깎인다(임의 튜닝값)."""
-
-
-def _saturating_attraction(base_weight: float, intensity: float) -> float:
-    """
-    2026-07-27 변경: 오브젝트 강도(intensity)에 따른 매력도 증가를 선형이 아니라
-    포화 곡선(제곱근)으로 바꿨다. 이전엔 intensity가 늘어난 만큼 매력도가 그대로
-    비례해서 늘었는데, 실제로는 "이미 충분히 눈에 띄는 오브젝트"가 강도를 더
-    올린다고 그만큼 더 매력적이지는 않다는 점을 반영한 것 - 강도 0.5에서 1.0으로
-    올려도 효과 증가폭이 처음보다 완만해진다(임의 튜닝, sqrt 곡선).
-    """
-    return base_weight * math.sqrt(max(intensity, 0.0))
+값이 클수록 조금만 붐벼도 매력도가 빨리 깎인다(임의 튜닝값). 이 값은 시장 구역
+자체의 기본 매력도(DB의 zone.attraction)에만 쓰이며, PlacedObject와는 무관하다."""
 
 
 def apply_scenario_overrides(
@@ -260,7 +280,20 @@ def apply_scenario_overrides(
     objects: list[PlacedObject],
     corridor_policies: list[CorridorPolicy],
 ) -> None:
+    """
+    2026-08-02 변경: PlacedObject의 매력도(attraction) 부여 로직을 전면 제거했다.
+    이제 food_truck/event_zone/rest_area/obstacle 네 타입 전부 동일하게
+    "사람을 끌어당기지 않고, 그 자리를 물리적으로 못 지나가게만 만드는" 장애물로
+    취급한다. 화재/대피 상황에서도 그냥 회피 대상 장애물로 작동한다.
+    """
     extra_obstacles: list[tuple[float, float, float]] = []
+
+    radius_by_type: dict[str, float] = {
+        "food_truck": FOOD_TRUCK_RADIUS_M,
+        "event_zone": EVENT_ZONE_RADIUS_M,
+        "rest_area": REST_AREA_RADIUS_M,
+        "obstacle": OBSTACLE_BASE_RADIUS_M,
+    }
 
     for obj in objects:
         spec = layout.zones.get(obj.zoneId)
@@ -273,16 +306,12 @@ def apply_scenario_overrides(
             rp = spec.polygon_local.representative_point()
             lx, ly = rp.x, rp.y
 
-        if obj.objectType == "food_truck":
-            spec.attraction += _saturating_attraction(FOOD_TRUCK_ATTRACTION, obj.intensity)
-        elif obj.objectType == "event_zone":
-            spec.attraction += _saturating_attraction(EVENT_ZONE_ATTRACTION, obj.intensity)
-        elif obj.objectType == "rest_area":
-            spec.attraction += _saturating_attraction(REST_AREA_ATTRACTION, obj.intensity)
-        elif obj.objectType == "obstacle":
-            radius = OBSTACLE_BASE_RADIUS_M * (0.5 + obj.intensity)
-            extra_obstacles.append((lx, ly, radius))
-            spec.attraction = max(0.0, spec.attraction - EVENT_ZONE_ATTRACTION * obj.intensity * 0.3)
+        base_radius = radius_by_type.get(obj.objectType)
+        if base_radius is None:
+            continue
+
+        radius = base_radius * (0.5 + obj.intensity)
+        extra_obstacles.append((lx, ly, radius))
 
     if extra_obstacles:
         layout.walkable_grid = WalkableGrid.build(
@@ -346,7 +375,13 @@ ACOUSTIC_INTENSITY_RADIUS_M = 15.0
 
 def apply_event_triggers(model: MarketDigitalTwin, events: list[EventTrigger]) -> None:
     """
-    2026-07-25 추가: 화재/음향 이상 이벤트를 이번 시뮬레이션 실행에 반영한다.
+    2026-07-25 추가, 2026-08-XX 변경: 화재/음향 이상 이벤트를 이번 시뮬레이션
+    실행에 반영한다.
+
+    2026-08-XX 변경: 화재가 나면 발생 구역만이 아니라 시장 전체가 대피 대상이
+    된다(model.forced_evacuation_zones에 전체 구역 등록) - "화재나면 일단
+    모두 대피"가 자연스럽다는 판단. 강제 위험도 점수(색상 진하기)는 화재
+    발생 구역에만 부여한다.
 
     model이 이미 만들어져 에이전트가 스폰된 뒤에 호출해야 한다(음향 이상은
     그 시점의 에이전트 좌표를 기준으로 반경 판정을 하기 때문). 좌표 정밀도는
@@ -368,6 +403,7 @@ def apply_event_triggers(model: MarketDigitalTwin, events: list[EventTrigger]) -
         if event.eventType == "fire":
             forced_score = FIRE_BASE_SCORE + FIRE_INTENSITY_RANGE * event.intensity
             model.set_forced_risk(event.zoneId, forced_score)
+            model.forced_evacuation_zones.update(layout.zones.keys())
         elif event.eventType == "acoustic_anomaly":
             radius = ACOUSTIC_BASE_RADIUS_M + ACOUSTIC_INTENSITY_RADIUS_M * event.intensity
             model.apply_acoustic_burst(ex, ey, radius)
@@ -407,6 +443,11 @@ class MarketDigitalTwin(Model):
         # 구역별 위험도. set_forced_risk()로 채워지고 evaluate_risk()가 반영한다.
         self.forced_risk: dict[int, float] = {}
 
+        # 2026-08-XX 추가: 화재가 나면 개인별 risk_tolerance와 무관하게
+        # 무조건 대피해야 하는 구역 집합. apply_event_triggers()가 채우고,
+        # VisitorAgent.step()이 확인한다.
+        self.forced_evacuation_zones: set[int] = set()
+
 
         self.pois: list[dict] = self.layout.pois
 
@@ -426,7 +467,7 @@ class MarketDigitalTwin(Model):
             return list(self.pois)
         weights = [poi.get("weight", 1.0) for poi in self.pois]
         return self._rng.choices(self.pois, weights=weights, k=count)
-        
+
     def get_pois_near(self, x: float, y: float, radius: float) -> list[dict]:
         near = []
         for p in self.pois:
@@ -434,7 +475,7 @@ class MarketDigitalTwin(Model):
             if dist <= radius:
                 near.append(p)
         return near
-        
+
     def count_agents_near(self, x: float, y: float, radius_m: float) -> int:
         count = 0
         for agent in self.agents:
@@ -618,15 +659,58 @@ class MarketDigitalTwin(Model):
     def build_path(
         self, from_x: float, from_y: float, to_x: float, to_y: float, arrive_zone: int | None
     ) -> list[tuple[float, float, int | None]]:
+        """
+        2026-08-XX: 경로를 못 찾으면(막다른 곳 등) 목적지까지 직선으로 뚫고
+        가지 않는다 - 이동 가능 영역이 이제 통로 모양 그대로라 더 자주 걸릴 수
+        있어서, 실패 시 목적지 근처에서 갈 수 있는 가장 가까운 지점까지만
+        경로를 잡는 폴백을 둔다(완전히 멈추지도, 벽을 뚫지도 않음).
+
+        또한 shortest_path()는 목적지 셀이 막혀 있으면 내부적으로 조용히
+        근처 셀로 스냅해서 성공 처리하는데, 그 경우에도 원래 요청 좌표가
+        아니라 실제 도달한 지점을 마지막 웨이포인트로 쓴다.
+        """
         grid = self.layout.walkable_grid
-        cell_path = grid.shortest_path(grid.to_cell(from_x, from_y), grid.to_cell(to_x, to_y))
+        start_cell = grid.to_cell(from_x, from_y)
+        goal_cell = grid.to_cell(to_x, to_y)
+
+        cell_path = grid.shortest_path(start_cell, goal_cell)
         if not cell_path or len(cell_path) < 2:
-            return [(to_x, to_y, arrive_zone)]
+            nearest = grid._nearest_walkable(goal_cell, max_radius=15)
+            if nearest is None or nearest == start_cell:
+                return []
+            fallback_path = grid.shortest_path(start_cell, nearest)
+            if not fallback_path or len(fallback_path) < 2:
+                return []
+            waypoints = [grid.to_point(c) for c in fallback_path[1:]]
+            return [(wx, wy, None) for wx, wy in waypoints]
 
         waypoints = [grid.to_point(c) for c in cell_path[1:-1]]
         path: list[tuple[float, float, int | None]] = [(wx, wy, None) for wx, wy in waypoints]
-        path.append((to_x, to_y, arrive_zone))
+
+        last_reached_x, last_reached_y = grid.to_point(cell_path[-1])
+        snap_distance = ((last_reached_x - to_x) ** 2 + (last_reached_y - to_y) ** 2) ** 0.5
+        if snap_distance <= grid.cell_size_m:
+            path.append((to_x, to_y, arrive_zone))
+        else:
+            path.append((last_reached_x, last_reached_y, arrive_zone))
         return path
+
+    def nearest_open_gate(self, x: float, y: float) -> dict | None:
+        """
+        2026-08-XX 추가: 대피 시 "구역을 한 칸씩 거쳐서 출구 구역까지 간 다음
+        그 구역의 게이트로" 가던 방식 대신, 지금 위치에서 직선거리 기준으로
+        가장 가까운 열린 게이트를 바로 목적지로 잡는다. 실제 걷는 경로는
+        build_path()가 통로망을 따라 알아서 찾아준다(직선거리는 "어느 게이트가
+        가까운지" 후보를 고르는 용도일 뿐, 실제 이동 경로가 직선이라는 뜻은
+        아니다). layout.gates는 apply_gate_closures()가 닫힌 게이트를 이미
+        제거한 상태라 여기 있는 건 전부 열려있는 게이트다.
+        """
+        if not self.layout.gates:
+            return None
+        return min(
+            self.layout.gates,
+            key=lambda g: (g["x"] - x) ** 2 + (g["y"] - y) ** 2,
+        )
 
     def inject_inflow(self, count: int) -> None:
         gates = [g for g in self.layout.gates if g.get("zone_id") is not None]

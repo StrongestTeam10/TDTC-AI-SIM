@@ -82,16 +82,17 @@ class VisitorAgent(Agent):
         self.action_state = ActionState.ENTERING
 
         # 에이전트 유형 할당 (20%, 60%, 20%)
+        # 2026-08-XX 변경: 전체적으로 속도를 1씩 낮춤(요청 반영).
         rand_val = random.random()
         if rand_val < 0.2:
             self.agent_type = AgentType.PASS_THROUGH
-            self.speed = random.uniform(12.0, 14.0)  # 1.2~1.4 m/s * 10s
+            self.speed = random.uniform(11.0, 13.0)  # 원래 12.0~14.0에서 -1
         elif rand_val < 0.8:
             self.agent_type = AgentType.SHOPPING
-            self.speed = random.uniform(8.0, 10.0)  # 0.8~1.0 m/s * 10s
+            self.speed = random.uniform(7.0, 9.0)  # 원래 8.0~10.0에서 -1
         else:
             self.agent_type = AgentType.FOOD_TOUR
-            self.speed = random.uniform(8.0, 10.0)
+            self.speed = random.uniform(7.0, 9.0)  # 원래 8.0~10.0에서 -1
 
         self.risk_tolerance = (
             risk_tolerance if risk_tolerance is not None else random.uniform(0.3, 0.9)
@@ -150,11 +151,18 @@ class VisitorAgent(Agent):
 
         zone_risk = self.model.zone_risk_score(self.zone_id)
 
+        # 2026-08-XX 추가: 화재로 시장 전체가 대피 대상이 되면, 개인별
+        # risk_tolerance와 무관하게 무조건 대피한다.
+        forced_evacuation = self.zone_id in self.model.forced_evacuation_zones
+
         # 1. Situation 평가 (위험도)
-        if zone_risk >= self.evacuation_threshold or self.state is VisitorState.EVACUATING:
+        if forced_evacuation or zone_risk >= self.evacuation_threshold or self.state is VisitorState.EVACUATING:
             if self.state is not VisitorState.EVACUATING:
                 self.model.ever_evacuating = True
                 self.model.evacuated_count += 1
+                # 2026-08-XX 추가: 대피가 방금 시작된 시점이면 원래 가던
+                # 경로를 버리고, 가까운 열린 게이트로 경로를 새로 잡는다.
+                self._path = []
             self.state = VisitorState.EVACUATING
             self.action_state = ActionState.EXITING
             self._ensure_path_to_exit()
@@ -291,24 +299,20 @@ class VisitorAgent(Agent):
     def _ensure_path_to_exit(self) -> None:
         """대피/퇴장 경로가 없으면(또는 다 걸었으면) 다음 행동을 정한다.
 
-        출구 구역보다 더 가까운 인접 구역이 있으면 그쪽으로 한 구역 더
-        이동한다. 더 가까운 구역이 없다는 건 이미 출구 구역에 도착했다는
-        뜻이므로, 그 구역 안의 열려있는 게이트로 마저 걸어가서 실제로
-        퇴장하게 한다(도착 처리는 _advance_along_path에서 처리). 게이트가
-        없으면(전부 닫힘) 아무 경로도 안 잡고 제자리에 멈춘다.
+        2026-08-XX 변경: 예전에는 "출구 구역까지 인접 구역을 한 칸씩 거쳐서
+        이동 -> 그 구역 안의 게이트로" 방식이었는데, 이제는 지금 위치에서
+        직선거리 기준 가장 가까운 열린 게이트를 바로 목적지로 잡는다. 실제
+        걷는 경로는 build_path()가 통로망(walkable_grid)을 따라 알아서
+        찾아준다 - 구역을 거칠 필요 없이 통로가 이어져 있으면 바로 간다.
+        열린 게이트가 하나도 없으면(전부 닫힘) 아무 경로도 안 잡고 제자리에
+        멈춘다.
         """
         if self._path:
             return
-        next_zone = self.model.next_zone_toward_exit(self.zone_id)
-        if next_zone is not None and next_zone != self.zone_id:
-            dest_x, dest_y = self.model.random_point_in_zone(next_zone)
-            self._path = self.model.build_path(self.x, self.y, dest_x, dest_y, next_zone)
-            return
-
-        gate = self.model.gate_in_zone(self.zone_id)
+        gate = self.model.nearest_open_gate(self.x, self.y)
         if gate is not None:
             self._path = self.model.build_path(self.x, self.y, gate["x"], gate["y"], None)
-        # else: 열린 게이트가 없음 - 이 구역에 멈춰서 대기 (막힌 상태)
+        # else: 열린 게이트가 없음 - 이 자리에 멈춰서 대기 (막힌 상태)
 
     def _maybe_plan_new_path(self) -> None:
         """

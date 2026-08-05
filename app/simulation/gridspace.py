@@ -31,6 +31,27 @@ PREFERRED_COST = 0.4
 """선호 경로 셀의 이동 비용 배율 (1.0 미만이면 그쪽으로 더 걷고 싶어함)."""
 
 
+def _circle_overlaps_cell(
+    ox: float, oy: float, orad: float,
+    cell_minx: float, cell_maxx: float, cell_miny: float, cell_maxy: float,
+) -> bool:
+    """
+    2026-08-XX 추가: 원(오브젝트)이 사각형(격자 셀)과 조금이라도 겹치는지 판정.
+
+    이전에는 "셀 중심점이 원 안에 있는가"만 봤는데, 격자 셀 크기(기본 1m)보다
+    작은 반경(예: 기본 장애물 0.5m)의 오브젝트는 중심이 칸과 칸 사이에 걸치면
+    어느 칸의 중심점도 원 안에 안 들어가서 통째로 안 막히는 문제가 있었다
+    (에이전트가 오브젝트 정중앙을 그냥 관통해서 지나감). 원-사각형 충돌 판정의
+    표준 방법(원 중심에서 사각형까지의 최단거리)으로 바꿔서, 작은 오브젝트도
+    자기가 걸친 칸은 확실히 막히게 한다.
+    """
+    closest_x = min(max(ox, cell_minx), cell_maxx)
+    closest_y = min(max(oy, cell_miny), cell_maxy)
+    dx = ox - closest_x
+    dy = oy - closest_y
+    return (dx * dx + dy * dy) <= orad * orad
+
+
 @dataclass
 class WalkableGrid:
     """보행 가능 영역을 나타내는 격자. 로컬 미터 좌표계 기준."""
@@ -75,6 +96,7 @@ class WalkableGrid:
         prepared = prep(walkable_area)
         mask = [[False] * n_cols for _ in range(n_rows)]
         cost = [[1.0] * n_cols for _ in range(n_rows)]
+        half = cell_size_m / 2
 
         for row in range(n_rows):
             cy = miny + (row + 0.5) * cell_size_m
@@ -84,7 +106,10 @@ class WalkableGrid:
                 if not prepared.contains(point):
                     continue
                 blocked = any(
-                    (cx - ox) ** 2 + (cy - oy) ** 2 <= orad ** 2
+                    _circle_overlaps_cell(
+                        ox, oy, orad,
+                        cx - half, cx + half, cy - half, cy + half,
+                    )
                     for ox, oy, orad in obstacles
                 )
                 if blocked:

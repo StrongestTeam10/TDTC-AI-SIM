@@ -162,20 +162,6 @@ class RiskScoreDto(BaseModel):
 class ScenarioResult(BaseModel):
     """
     파이프라인 B 응답. BE ScenarioResultDto와 1:1 매칭.
-
-    frames: 스텝별 전체 에이전트 상태 (프론트 애니메이션 재생용).
-    evacuationTimeSeconds: 위험으로 대피를 시작한 에이전트 전원이 출구 구역에
-        도달하는 데 걸린 시간. 대피가 발생하지 않았거나 요청한 steps 내에
-        완료되지 못하면 None.
-    averageDensity/maxDensity: 2026-07-27 추가. 시뮬레이션 마지막 스텝 기준
-        구역별 밀집도(명/m^2)의 평균/최댓값. BE가 simrslt01d(predicted_density,
-        predicted_max_density)에 그대로 저장하는 용도.
-    maxDensityZoneId/maxDensityZoneName: 2026-07-27 추가. 최대 밀집도가 발생한
-        구역. 보고서에 "중앙통로에서 최대 6.8명/㎡" 같은 문장을 쓰려면 숫자만으론
-        부족해서 추가함.
-    evacuatedCount: 2026-07-27 추가. 시뮬레이션 중 실제로 대피 상태(EVACUATING)가
-        됐던 에이전트 수(현재 대피 중이거나 이미 게이트로 퇴장 완료한 인원 포함).
-        정책 효과를 "위험 인원이 N명 줄었다"처럼 서술하는 데 쓰인다.
     """
 
     scenarioId: str
@@ -213,6 +199,9 @@ class PredictRequest(BaseModel):
             "유입되고 합계가 이 값에 맞춰짐(스텝당 고정 인원이 아님). 0이면 신규 유입 없음"
         ),
     )
+    # 2026-08-XX 추가: 이벤트(화재/음향이상)만 Before/After 양쪽에 동일하게 배치
+    # 가능해야 해서 여기도 받는다. 오브젝트/통로정책/게이트는 여전히 ScenarioRequest 전용.
+    events: list[EventTrigger] = Field(default_factory=list)
     seed: int | None = None
 
 
@@ -245,4 +234,3 @@ class PredictResult(BaseModel):
     maxDensityZoneId: int | None = None
     maxDensityZoneName: str | None = None
     evacuatedCount: int = 0
-
