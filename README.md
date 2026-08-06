@@ -27,32 +27,72 @@
 ### 정책 시뮬레이션 결과 보고서 생성
 
 ```text
-정책 시나리오 실행
-    ↓
-시뮬레이션 결과 저장
-    ↓
-사용자가 [보고서 생성] 버튼 선택
-    ↓
-Spring Boot가 change_id 기준으로 기준안·대안 결과 조회
-    ↓
-POST /simulation/reports
-    ↓
-지표 비교 + 공공문서 RAG 검색 + LLM 본문 생성
-    ↓
-DOCX 및 분석 JSON 생성
-    ↓
-GET /simulation/reports/{report_id}/docx
+[FE]  정책 시나리오 실행 → 시뮬레이션 결과 저장
+        ↓
+      사용자가 [보고서 생성] 선택 (scenarioId 하나만 지목)
+        ↓
+      POST /api/simulation/reports        ← BE의 API
+        ↓
+[BE]  그 시나리오의 market_id로 같은 시장의 현행안을 찾아
+      시장·구역·시나리오·결과를 JSON 한 덩어리로 조립
+        ↓
+      POST /simulation/reports/file       ← SIM의 API (이 저장소)
+        ↓
+[SIM] 지표 비교 + 공공문서 RAG 검색 + LLM 본문 생성 + 차트 렌더
+        ↓
+      DOCX 바이트를 응답 본문으로, 문서 제목을 X-Report-Title 헤더로 반환
+        ↓
+[BE]  S3에 업로드하고 경로·제목을 DB에 기록 → presigned URL 반환
+        ↓
+[FE]  받은 URL로 DOCX 다운로드
 ```
 
+만들어 둔 보고서를 다시 받을 때는 `GET /api/simulation/reports/{scenarioId}/download`(BE)로
+presigned URL만 재발급한다. S3에 파일이 그대로 있으므로 SIM을 다시 부르지 않는다.
+
 #### 보고서 관련 API
-| 엔드포인트 |	용도 |
+
+| 엔드포인트 | 용도 |
 |---|---|
-| `POST /simulation/reports` | 저장된 시뮬레이션 결과를 바탕으로 보고서 생성 |
-| `GET /simulation/reports/{report_id}/docx` | 생성된 DOCX 다운로드 |
+| `POST /simulation/reports/file` | 보고서를 만들어 **DOCX 파일 자체**를 응답 본문으로 돌려준다. 운영에서 BE가 호출하는 경로 |
+| `POST /simulation/reports` | 생성 로직은 같고 **파일이 저장된 경로를 JSON**으로 돌려준다. 로컬 디버깅용 |
+| `GET /simulation/reports/{report_id}/docx` | 위에서 만들어진 DOCX를 내려받는다. 로컬 디버깅용 |
 | `GET /simulation/reports/{report_id}/analysis` | 지표 비교와 RAG 근거 JSON 조회 |
 | `GET /simulation/reports/status` | 보고서 검색기와 본문 생성기 상태 확인 |
-| `POST /simulation/reports/file` | DOCX를 즉시 반환하는 테스트·시연용 API |
-| `POST /simulation/reports/mock/{mock_name}` | ERD Mock 기반 개발용 API |
+| `POST /simulation/reports/mock/{mock_name}` | `data/db/*.json` Mock 기반 개발용 API |
+
+BE가 `POST /simulation/reports` 대신 `/file`을 쓰는 이유: 전자가 돌려주는 경로는 SIM
+컨테이너의 로컬 디스크(`outputs/`)라 재시작하면 사라지고, 인스턴스가 2대 이상이면 다른
+인스턴스가 그 파일을 찾지 못한다. 파일 자체를 받아 S3에 올려야 보관이 보장된다.
+
+#### 입력 계약 (`DbReportBundle`)
+
+**SIM은 보고서 생성에 DB를 쓰지 않는다.** 필요한 행을 BE가 모두 읽어 JSON으로 실어
+보내고, SIM은 받은 것만으로 문서를 만든다. 스키마는 `app/schemas/report_db_models.py`.
+
+| 필드 | 내용 |
+|---|---|
+| `report_meta` | `report_id`(경로에 쓰이므로 `[A-Za-z0-9_-]{1,100}`), 제목, 의사결정 질문 |
+| `market`, `zones` | 시장 기본정보와 구역 목록 |
+| `baseline_scenario`, `baseline_result` | **현행안**(`simbsln01m` / `simbsln01d`) |
+| `scenario_rows`, `result_rows` | **대안 시나리오**(`simscnr01m` / `simrslt01d`), 최소 1건 |
+| `density_timeseries_rows` | 시간대별 밀집도. BE에 대응 테이블이 없어 현재는 늘 비어 있다 |
+
+현행안을 별도 필드로 둔 이유: 현행안과 시나리오는 서로 다른테이블이라 **ID가 각각 1부터 시작해 겹칠 수 있다.** 
+한 배열에 담으면 `scenario_id`로 둘을 구분할 수 없다.
+
+#### 위험 이벤트 대응 방안 절
+
+화재 이벤트가 상정된 시나리오에 한해 보고서 "7. 종합 검토 의견" 아래
+"위험 이벤트 대응 방안" 절이 생성된다. 이벤트가 없으면 절 자체가 생성되지 않는다.
+
+내용은 전달받은 값으로만 조립한다 — 상정된 이벤트(구역·강도·건수·발동 스텝), 대피 인원,
+최대 밀집 구역, 위험점수 변화. LLM 모드에서도 이 템플릿 결과를 바닥에 깔아, LLM이 키를
+누락하거나 형식을 어겨도 절이 사라지지 않도록 한다.
+
+시나리오별 예측 결과표(4절)의 "대피 인원"·"최대 밀집 구역" 열 또한 해당 데이터가
+있을 때만 생긴다. 대피는 구역 위험도가 임계를 넘으면 발생하므로 이벤트가 없어도 혼잡만으로
+생길 수 있어, 값이 하나라도 양수이거나 이벤트가 있으면 열을 만든다.
 
 ## 폴더 구조
 
@@ -155,6 +195,7 @@ API 문서: http://localhost:8000/docs
 - **레이더/음향 센서는 2026-07-23부로 완전히 제거**되었다. 관련 DB 테이블(`senradr01m/h`, `audevnt01m/h`), 리포지토리 함수, 위험도 가중치 항목까지 코드에서 전부 삭제되었다. (참고로 제거 전에는 비명 감지 등 밀집도와 무관한 사건을 밀집 위험 점수에 섞기보다 독립 알림 체계로 분리하는 것이 적절하다는 논의가 있었다.)
 - **파이프라인 B의 이벤트 모델 미구현**: 화재 확산, 음향 전파, 통로 폐쇄 영향 시뮬레이션.
 - **캘리브레이션 필요**: 현재 임계값은 일반 인파 기준이며, 실제 시장 특성(점포 배치, 상시 체류 인원 등)에 맞춘 보정이 필요하다.
+- **`outputs/` 정리 정책이 없다.** BE가 S3에 올린 뒤에도 로컬 산출물이 `{report_id}/` 단위로 계속 쌓여 수동으로 지워야 한다.
 
 ## 공간 데이터 전제
 
@@ -225,6 +266,9 @@ REPORT_VECTOR_INDEX_PATH=knowledge/vector_index.json
 1. 지속가능한 관광지 혼잡도 운영 관리 매뉴얼
 2. 2025 행정업무운영 편람
 3. 쉬운 공문서 쓰기 길잡이
+4. 2025 전통시장 안전관리 매뉴얼
+5. 전통시장 화재안전점검 운영지침(중소벤처기업부고시)(제2024-62호)(20240913)
+6. 230703(석간) 정부 전통시장 화재 예방 및 안전관리 대책 발표(재난안전조사과)
 
 PDF 원문은 Git에 포함하지 않는다.
 
@@ -256,7 +300,7 @@ python -m pytest tests/reporting -m "not integration" -q
 현재 검증 결과:
 
 ```text
-3 passed, 1 deselected
+7 passed, 1 deselected
 ```
 
 ### 6. OpenAI Vector RAG 통합 테스트
@@ -291,8 +335,7 @@ http://127.0.0.1:8000/docs
 서버 실행 명령이 현재 PowerShell을 점유하므로,
 다음 단계는 새로운 PowerShell 창에서 실행한다.
 
-### 8. 보고서 생성 확인
-
+### 8. Mock으로 SIM 단독 확인
 새 PowerShell에서 프로젝트 루트로 이동한다.
 
 ```powershell
@@ -360,3 +403,6 @@ $analysisUrl = "http://127.0.0.1:8000$($response.analysis_url)"
 Invoke-RestMethod -Uri $analysisUrl |
 ConvertTo-Json -Depth 10
 ```
+
+> `night_market`을 비롯한 기존 Mock 3개는 이벤트가 없는 정책 시나리오다.
+> 위험 이벤트 대응 방안 절과 대피 인원·최대 밀집 구역 열은 나오지 않는다.
