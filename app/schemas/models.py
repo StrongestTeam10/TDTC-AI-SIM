@@ -49,23 +49,33 @@ class CorridorPolicy(BaseModel):
 
 class EventTrigger(BaseModel):
     """
-    2026-07-25 추가: 화재/음향 이상 이벤트를 지도 클릭으로 배치. BE EventTriggerDto와 1:1 매칭.
+    2026-07-25 추가: 화재 이벤트를 지도 클릭으로 배치. BE EventTriggerDto와 1:1 매칭.
 
     fire: 해당 구역의 위험도를 강제로 끌어올려(75 + 25*intensity) 그 구역 사람들이
         계속 대피 상태를 유지하게 한다(지속 효과).
-    acoustic_anomaly: 발생 지점 반경(5 + 15*intensity m) 안의 사람들을 그 순간
-        한 번만 강제로 대피시킨다(즉발성, 밀집도와 무관).
 
     2026-07-29 추가: triggerStep. 이 이벤트가 실제로 발동하는 스텝 번호(1부터
     시작). 기본값 1이면 예전처럼 시뮬레이션 시작 시점에 바로 발동한다.
+
+    2026-08-XX 변경: 음향 이상(acoustic_anomaly) 이벤트 완전 제거. 이제
+    eventType은 "fire" 하나뿐이다.
     """
 
-    eventType: str = Field(..., description="fire | acoustic_anomaly")
+    eventType: str = Field(..., description="fire")
     zoneId: int
     intensity: float = Field(0.5, ge=0.0, le=1.0)
     latitude: float | None = Field(None, description="지도에서 정밀 배치 시 위도")
     longitude: float | None = Field(None, description="지도에서 정밀 배치 시 경도")
-    triggerStep: int = Field(1, ge=1, description="이 이벤트가 발동하는 스텝 번호(1부터 시작)")
+    triggerStep: int = Field(1, ge=1, description="이 이벤트가 발동(발화)하는 스텝 번호(1부터 시작)")
+    # 2026-08-XX 추가: 화재 생애주기. triggerStep에 발화 -> burnSteps 동안 연소
+    # (위험도 최대 유지) -> 진압 -> recoverySteps 동안 위험도가 서서히 0으로
+    # 감쇠(복구) -> 복구 완료 후 정상 상태로 돌아가고 유동인구 재유입이 재개된다.
+    burnSteps: int = Field(
+        18, ge=1, description="발화 후 이 스텝 수만큼 연소(위험도 최대 유지). 기본 18(약 3분)"
+    )
+    recoverySteps: int = Field(
+        12, ge=0, description="진압 후 위험도가 0으로 감쇠하며 복구되는 스텝 수. 기본 12(약 2분)"
+    )
 
 class ScenarioRequest(BaseModel):
     """파이프라인 B: 사용자 지정 시나리오 요청.
@@ -116,6 +126,10 @@ class AgentState(BaseModel):
     state: str
     agentType: str = "PASS_THROUGH"
     actionState: str = "MOVING"
+    # 2026-08-XX 추가: 이 에이전트가 현재 있는 구역의 위험도 점수(0~100).
+    # FE에서 위험도에 따라 에이전트 색을 다르게(빨강/노랑/파랑) 칠하는 데 쓴다.
+    # 화재 발생 구역이 가장 높고, 확산 감쇠에 따라 주변이 낮아진다.
+    dangerLevel: float = 0.0
 
 class PoiState(BaseModel):
     name: str
@@ -181,27 +195,37 @@ class PredictRequest(BaseModel):
     """
     2026-07-24 추가: 실측 상태에서 출발한 예측 시뮬레이션 요청.
 
-    파이프라인 B(ScenarioRequest)와 달리 화재 등 외부 충격 이벤트를 다루지 않는다.
-    실제 관측된 인원 배치를 초기 상태로 삼아, 매대(오브젝트) 매력도 기반 자연스러운
-    이동과 게이트를 통한 신규 유입만으로 "인구가 몰렸을 때" 위험도가 어떻게
-    전개되는지를 본다.
+    2026-08-XX 변경: 이제 ScenarioRequest(After)와 같은 방식으로 초기
+    인원을 구역 면적 비례로 배치한다(자세한 이유는 simulate.py
+    simulate_predict()의 docstring 참고) - 오브젝트/이벤트 개입이 없으면
+    Before/After가 완전히 동일하게 동작해야 "무엇이 개입 때문에 달라졌는지"를
+    비교할 수 있기 때문이다. 오브젝트 배치/통로정책/게이트 폐쇄는 여전히
+    ScenarioRequest(After) 전용이다.
     """
 
     marketId: int
     capturedAt: datetime | None = Field(
-        None, description="예측의 출발점이 되는 실측 시점. 미지정 시 최신 관측값 사용"
+        None,
+        description=(
+            "(더 이상 초기 배치에 쓰이지 않음 - 하위 호환을 위해 필드만 남겨둠. "
+            "2026-08-XX 이전에는 이 시점의 실측 CCTV 관측값을 예측 출발점으로 썼다.)"
+        ),
     )
     steps: int = Field(30, ge=1, le=1000)
     totalInflow: int = Field(
         0, ge=0, le=100_000,
         description=(
-            "전체 시뮬레이션 동안 게이트로 유입될 총 인원수. 스텝마다 무작위 인원이 "
-            "유입되고 합계가 이 값에 맞춰짐(스텝당 고정 인원이 아님). 0이면 신규 유입 없음"
+            "2026-08-XX 변경: 시뮬레이션 시작 시점에 구역 면적 비례로 한 번에 배치할 "
+            "총 인원수(ScenarioRequest.agentCount와 동일한 의미). 예전처럼 스텝마다 "
+            "게이트로 서서히 유입되지 않는다 - After와 동일한 기준선으로 비교하기 위함."
         ),
     )
-    # 2026-08-XX 추가: 이벤트(화재/음향이상)만 Before/After 양쪽에 동일하게 배치
-    # 가능해야 해서 여기도 받는다. 오브젝트/통로정책/게이트는 여전히 ScenarioRequest 전용.
+    # 2026-08-XX 추가: 이벤트(화재)만 Before/After 양쪽에 동일하게 배치
+    # 가능해야 해서 여기도 받는다. 오브젝트/통로정책은 여전히 ScenarioRequest 전용.
     events: list[EventTrigger] = Field(default_factory=list)
+    # 2026-08-XX 추가: 게이트 개폐는 개입 전/후 독립적으로 조절 가능해야 해서
+    # Before(predict)도 닫힌 게이트 목록을 받는다(FE에서 양쪽 지도 각각 클릭 토글).
+    closedGateIds: list[int] = Field(default_factory=list)
     seed: int | None = None
 
 

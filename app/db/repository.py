@@ -142,15 +142,22 @@ def count_people_in_frame(bev_xyz_json) -> int:
     """
     bev_xyz_json 1건의 인원수를 센다.
 
-    실제 적재 데이터를 확인한 결과 {"person_1": {"x":..,"y":..}, "person_2": {...}}
-    형태의 JSON **객체**다(배열이 아님 - PEDAGGR01H 테이블 정의 주석에 남아있던
-    "JSON 배열" 가정은 폐기, person_N은 프레임 간 지속되는 추적 ID). 최상위 키
+    실제 적재 데이터를 확인한 결과 대부분 {"person_1": {"x":..,"y":..}, ...}
+    형태의 JSON **객체**다(person_N은 프레임 간 지속되는 추적 ID). 최상위 키
     개수가 곧 해당 프레임의 인원수다.
+
+    2026-08-XX 수정: 사람이 0명인 프레임은 객체가 아니라 빈 배열 `[]`로 적재된
+    경우가 있어(운영 중 실제 500 에러로 확인됨: bev_xyz_json이 list인데
+    json.loads()에 그대로 넘겨서 "must be str, bytes or bytearray, not list"
+    로 죽었었다), dict/list 둘 다 이미 파싱된 값으로 보고 그대로 len()을
+    쓰도록 방어적으로 바꿨다. DB 드라이버가 JSONB를 문자열로 주는 경우에만
+    json.loads()를 거친다.
     """
     if not bev_xyz_json:
         return 0
-    #data = bev_xyz_json if isinstance(bev_xyz_json, dict) else json.loads(bev_xyz_json)
-    data = json.loads(bev_xyz_json) if isinstance(bev_xyz_json, str) else bev_xyz_json
+
+    # data = json.loads(bev_xyz_json) if isinstance(bev_xyz_json, str) else bev_xyz_json
+    data = bev_xyz_json if isinstance(bev_xyz_json, (dict, list)) else json.loads(bev_xyz_json)
     return len(data)
 
 
