@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import health, simulate, reports
+from app.api import health, simulate, reports, policy
 from app.db import connection
 
 logger = logging.getLogger(__name__)
@@ -37,3 +37,4 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(simulate.router)
 app.include_router(reports.router)
+app.include_router(policy.router, prefix="/policy", tags=["policy"])
