@@ -149,7 +149,8 @@ def count_people_in_frame(bev_xyz_json) -> int:
     """
     if not bev_xyz_json:
         return 0
-    data = bev_xyz_json if isinstance(bev_xyz_json, dict) else json.loads(bev_xyz_json)
+    #data = bev_xyz_json if isinstance(bev_xyz_json, dict) else json.loads(bev_xyz_json)
+    data = json.loads(bev_xyz_json) if isinstance(bev_xyz_json, str) else bev_xyz_json
     return len(data)
 
 
