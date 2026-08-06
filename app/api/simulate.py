@@ -1,7 +1,6 @@
 """시뮬레이션 엔드포인트."""
 from __future__ import annotations
 
-import random
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -37,6 +36,23 @@ STEP_DURATION_SECONDS = 10
 router = APIRouter(prefix="/simulate", tags=["simulate"])
 
 
+def _validate_event_trigger_steps(events: list, steps: int) -> None:
+    """triggerStep이 steps 범위를 벗어나면 그 이벤트는 영원히 발동하지 않고
+    아무 경고도 없이 조용히 무시된다(스텝 루프가 triggerStep == 현재 스텝일
+    때만 이벤트를 적용하기 때문). 사용자가 값을 잘못 넣었을 때 "화재를 냈는데
+    반응이 없다"처럼 오해하기 쉬우므로, 요청 단계에서 미리 에러로 알려준다."""
+    out_of_range = [e.triggerStep for e in events if e.triggerStep > steps]
+    if out_of_range:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"이벤트 triggerStep({sorted(set(out_of_range))})이 steps({steps})를 "
+                "초과해 해당 이벤트가 절대 발동하지 않습니다. triggerStep을 steps 이하로 "
+                "설정하거나 steps를 늘려주세요."
+            ),
+        )
+
+
 def _load_layout(market_id: int) -> MarketLayout:
     market = repo.fetch_market(market_id)
     if market is None:
@@ -49,10 +65,12 @@ def _load_layout(market_id: int) -> MarketLayout:
     adjacency = repo.fetch_adjacency(market_id)
     gates = repo.fetch_gates(market_id)
     stalls = repo.fetch_stalls(market_id)
-    # 2026-08-XX 변경: 이동 가능 영역을 이제 통로 좌표(mrkadjc01m) 기반으로
-    # 계산해서, 건물 데이터는 더 이상 여기서 안 쓴다(model.py 참고). 건물은
-    # 지도 표시(FE)용으로만 BE의 /buildings API를 통해 쓰인다.
-    return MarketLayout.from_db_rows(market, zones, adjacency, gates, stalls)
+    # 2026-08-XX 변경: 이동 가능 영역은 통로 좌표(mrkadjc01m) 기반으로 계산하되,
+    # 통로 데이터가 없는 구역(폴백 시 구역 폴리곤 전체를 쓰는 경우)에서도
+    # 에이전트가 건물 안으로 들어가지 않도록 건물 폴리곤(mrkbldg01m)을 함께
+    # 가져와 model.py에서 걸어다닐 수 있는 영역에서 뺀다.
+    buildings = repo.fetch_buildings(market_id)
+    return MarketLayout.from_db_rows(market, zones, adjacency, gates, stalls, buildings)
 
 
 @router.post("/snapshot", response_model=SnapshotResponse)
@@ -127,6 +145,8 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     requested_at = datetime.now(timezone.utc)
     scenario_id = str(uuid.uuid4())
 
+    _validate_event_trigger_steps(req.events, req.steps)
+
     layout = _load_layout(req.marketId)
 
     apply_scenario_overrides(layout, req.objects, req.corridorPolicies)
@@ -146,6 +166,8 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     }
 
     model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=42)
+    # 2026-08-XX: 평상시(화재 없음) 유동인구를 이 목표치 근처로 유지한다.
+    model.target_population = req.agentCount
 
     frames: list[list[dict]] = []
     evacuation_seconds: int | None = None
@@ -216,16 +238,6 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     )
 
 
-def _build_inflow_schedule(total: int, steps: int, seed: int | None) -> list[int]:
-    if total <= 0 or steps <= 0:
-        return [0] * steps
-    rng = random.Random(seed)
-    weights = [rng.random() for _ in range(steps)]
-    weight_sum = sum(weights) or 1.0
-    schedule = [round(total * w / weight_sum) for w in weights]
-    return schedule
-
-
 def _risk_trend_point(model: MarketDigitalTwin, step_index: int) -> RiskTrendPoint:
     zones = [
         ZoneRiskPoint(zoneId=zid, riskScore=r.score, riskLevel=r.level.value)
@@ -237,44 +249,72 @@ def _risk_trend_point(model: MarketDigitalTwin, step_index: int) -> RiskTrendPoi
 
 @router.post("/predict", response_model=PredictResult)
 def simulate_predict(req: PredictRequest) -> PredictResult:
+    """
+    파이프라인 A': Before(개입 전) 시뮬레이션.
+
+    2026-08-XX 변경: Before가 오브젝트/이벤트 개입이 하나도 없을 때는
+    After(/scenario)와 완전히 동일하게 동작하도록 통일했다. 예전에는 Before가
+    실측 CCTV 위치(fetch_latest_pedestrian_frames)에서 출발해 totalInflow만큼
+    게이트로 서서히 유입되는 방식이었고, After는 agentCount를 구역 면적
+    비례로 한 번에 배치하는 방식이라 두 시뮬레이션의 "기준선" 자체가 처음부터
+    달랐다 - 그러면 오브젝트/이벤트를 하나도 안 넣어도 두 결과가 다르게 나와서
+    뭐가 개입 때문에 달라진 건지 비교가 안 됐다.
+
+    이제 totalInflow(FE에서는 "인원 수" 입력값)를 ScenarioRequest.agentCount와
+    동일하게 "구역 면적 비례로 시작 시점에 한 번에 배치하는 인원 수"로 다루고,
+    실행 중 게이트로 서서히 유입되는 로직(inject_inflow)은 더 이상 쓰지 않는다.
+    시드도 명시적으로 안 주면 scenario와 같은 42를 써서, 오브젝트/통로정책/
+    게이트폐쇄/이벤트가 전부 없으면 두 시뮬레이션이 프레임 단위로 완전히
+    동일하게 나온다 - 그 상태에서 오브젝트나 이벤트를 하나씩 넣어봤을 때
+    달라지는 부분만 순수하게 그 개입의 효과라고 볼 수 있게 하기 위함이다.
+    오브젝트/통로정책/게이트폐쇄는 여전히 ScenarioRequest(After) 전용이다 -
+    Before/After 차이를 보려는 목적이므로 개입 수단 자체는 After에만 있어야
+    비교가 성립한다. capturedAt은 더 이상 초기 배치에 쓰이지 않는다(과거
+    요청과의 하위 호환을 위해 필드는 남겨둠).
+    """
     requested_at = datetime.now(timezone.utc)
     prediction_id = str(uuid.uuid4())
 
+    _validate_event_trigger_steps(req.events, req.steps)
+
     layout = _load_layout(req.marketId)
 
-    densities = repo.fetch_latest_pedestrian_frames(req.marketId, req.capturedAt)
-    observations: dict[int, ZoneObservation] = {}
-    for row in densities:
-        zid = row["zone_id"]
-        observations[zid] = ZoneObservation(
+    # 2026-08-XX: 게이트 개폐는 개입 전/후 독립적으로 조절 가능하므로 Before도 반영.
+    apply_gate_closures(layout, set(req.closedGateIds))
+
+    zone_ids = list(layout.zones.keys())
+    if not zone_ids:
+        raise HTTPException(status_code=400, detail="구역 데이터가 없습니다")
+
+    total_area = sum(z.area_m2 for z in layout.zones.values())
+    observations: dict[int, ZoneObservation] = {
+        zid: ZoneObservation(
             zone_id=zid,
-            visitor_count=repo.count_people_in_frame(row["bev_xyz_json"]),
+            visitor_count=int(req.totalInflow * (layout.zones[zid].area_m2 / total_area)),
         )
+        for zid in zone_ids
+    }
 
-    model = MarketDigitalTwin(
-        layout, observations, mode=SimulationMode.SCENARIO, seed=req.seed
-    )
-
-    inflow_schedule = _build_inflow_schedule(req.totalInflow, req.steps, req.seed)
+    seed = req.seed if req.seed is not None else 42
+    model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=seed)
+    # 2026-08-XX: 평상시 유동인구를 이 목표치 근처로 유지한다.
+    model.target_population = req.totalInflow
 
     frames: list[list[dict]] = []
     risk_trend: list[RiskTrendPoint] = []
     for step_index in range(req.steps):
-        # 2026-08-XX 추가: 화재/음향이상 이벤트를 지정된 triggerStep에 발동시킨다.
+        # 2026-08-XX 추가: 화재 이벤트를 지정된 triggerStep에 발동시킨다.
         # simulate_scenario()의 이벤트 발동 루프와 동일한 로직.
         current_step_number = step_index + 1
         due_events = [e for e in req.events if e.triggerStep == current_step_number]
         if due_events:
             apply_event_triggers(model, due_events)
 
-        if inflow_schedule[step_index] > 0:
-            model.inject_inflow(inflow_schedule[step_index])
         model.step()
         frames.append(_frame_agents(model))
         risk_trend.append(_risk_trend_point(model, step_index))
 
-    initial_count = sum(obs.visitor_count for obs in observations.values())
-    total_agent_count = initial_count + req.totalInflow
+    total_agent_count = sum(obs.visitor_count for obs in observations.values())
 
     risk_by_zone = model.risk
     if risk_by_zone:

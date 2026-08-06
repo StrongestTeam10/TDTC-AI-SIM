@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from shapely.geometry import LineString, Point
 from shapely.geometry.base import BaseGeometry
-from shapely.prepared import prep
+from shapely.prepared import prep, PreparedGeometry
 
 Cell = tuple[int, int]
 
@@ -63,6 +63,13 @@ class WalkableGrid:
     n_rows: int
     mask: list[list[bool]]  # mask[row][col] == True 이면 보행 가능
     cost: list[list[float]]  # cost[row][col] - 낮을수록 선호되는 경로 (기본 1.0)
+    zone_of: list[list[int | None]] | None = None
+    """zone_of[row][col] - 해당 셀이 속한 구역 id. blocked_zone_edges가 있을
+    때만 계산된다(계산 비용 때문에 평소엔 건너뜀). 2026-08-XX 추가: 일방통행
+    (one_way) 통로정책을 실제 셀 단위 이동에도 반영하기 위함."""
+    blocked_zone_edges: set[tuple[int, int]] | None = None
+    """(from_zone_id, to_zone_id) 쌍이 여기 있으면 그 방향으로의 구역 경계
+    이동을 막는다. neighbors8()에서 소비한다."""
 
     @classmethod
     def build(
@@ -72,12 +79,17 @@ class WalkableGrid:
         preferred_lines: list[list[tuple[float, float]]] | None = None,
         cell_size_m: float = 1.0,
         padding_m: float = 2.0,
+        zones: dict[int, BaseGeometry] | None = None,
+        blocked_zone_edges: set[tuple[int, int]] | None = None,
     ) -> "WalkableGrid":
         """
         walkable_area: 걸어다닐 수 있는 전체 영역 (보통 모든 구역 폴리곤의 union)
         obstacles: (x, y, radius_m) 목록 - 매대/푸드트럭 등 점유 오브젝트.
             아직 실제 오브젝트 데이터가 없으면 빈 리스트를 넘기면 된다(장애물 없음).
         preferred_lines: 통로 중심선(로컬 좌표 점 목록)들. 없으면 전부 기본 비용(1.0).
+        zones / blocked_zone_edges: 일방통행 정책이 있을 때만 넘긴다. zones는
+            구역별 폴리곤(zone_id -> geometry), blocked_zone_edges는 막힌
+            방향 쌍. 둘 다 있어야 셀별 구역 판정을 계산해 실제로 막는다.
         """
         preferred_lines = preferred_lines or []
         preferred_geoms = [
@@ -120,6 +132,24 @@ class WalkableGrid:
                 ):
                     cost[row][col] = PREFERRED_COST
 
+        zone_of: list[list[int | None]] | None = None
+        if zones and blocked_zone_edges:
+            zone_preps: list[tuple[int, PreparedGeometry]] = [
+                (zid, prep(poly)) for zid, poly in zones.items()
+            ]
+            zone_of = [[None] * n_cols for _ in range(n_rows)]
+            for row in range(n_rows):
+                cy = miny + (row + 0.5) * cell_size_m
+                for col in range(n_cols):
+                    if not mask[row][col]:
+                        continue
+                    cx = minx + (col + 0.5) * cell_size_m
+                    point = Point(cx, cy)
+                    for zid, zprep in zone_preps:
+                        if zprep.contains(point):
+                            zone_of[row][col] = zid
+                            break
+
         return cls(
             cell_size_m=cell_size_m,
             origin_x=minx,
@@ -128,6 +158,8 @@ class WalkableGrid:
             n_rows=n_rows,
             mask=mask,
             cost=cost,
+            zone_of=zone_of,
+            blocked_zone_edges=blocked_zone_edges if zone_of else None,
         )
 
     def to_cell(self, x: float, y: float) -> Cell:
@@ -171,8 +203,14 @@ class WalkableGrid:
 
         대각선 이동 시 양옆 두 칸이 모두 막혀있으면(벽/오브젝트 모서리를 스쳐
         지나가는 것) 제외한다.
+
+        2026-08-XX 추가: zone_of/blocked_zone_edges가 설정돼 있으면(일방통행
+        정책 적용 시) 현재 셀의 구역에서 후보 셀의 구역으로 넘어가는 방향이
+        막혀 있는 경우도 제외한다 - one_way가 논리 그래프뿐 아니라 실제 셀
+        단위 이동에도 반영되게 하기 위함.
         """
         row, col = cell
+        from_zone = self.zone_of[row][col] if self.zone_of else None
         result: list[Cell] = []
         for dr in (-1, 0, 1):
             for dc in (-1, 0, 1):
@@ -184,6 +222,16 @@ class WalkableGrid:
                 if dr != 0 and dc != 0:
                     if not self.is_walkable((row + dr, col)) and not self.is_walkable((row, col + dc)):
                         continue  # 모서리를 스쳐 지나가는 대각선 이동 금지
+                if self.zone_of is not None and self.blocked_zone_edges:
+                    cr, cc = candidate
+                    to_zone = self.zone_of[cr][cc]
+                    if (
+                        from_zone is not None
+                        and to_zone is not None
+                        and from_zone != to_zone
+                        and (from_zone, to_zone) in self.blocked_zone_edges
+                    ):
+                        continue
                 result.append(candidate)
         return result
 
@@ -193,6 +241,14 @@ class WalkableGrid:
         대각선 이동은 sqrt(2)배 거리로, 셀 비용(cost)은 두 셀의 평균으로 반영해서
         통로 중심선 근처(cost가 낮은 셀)를 더 선호하도록 한다.
         시작/목표 셀이 막혀 있으면(오브젝트 위 등) 근처 보행 가능 셀로 자동 보정한다.
+
+        2026-08-XX 시도: A*(옥타일 거리 휴리스틱)로 바꿔봤으나, 실제 시장
+        데이터로 같은 랜덤 시드를 고정해 A/B 측정한 결과 휴리스틱 계산
+        자체의 오버헤드가 탐색 절감분을 상쇄해 다익스트라보다 딱히 빠르지
+        않았다(오히려 근소하게 느린 경우도 있었음) - 그래서 원래 방식으로
+        되돌렸다. 실제 병목은 이 함수 자체의 알고리즘이 아니라
+        model.nearest_reachable_gate_path()가 게이트 후보마다 이 함수를
+        반복 호출하는 빈도였다(해당 함수의 docstring 참고).
         """
         start = self._nearest_walkable(start) or start
         goal = self._nearest_walkable(goal) or goal
@@ -234,3 +290,47 @@ class WalkableGrid:
             path.append(came_from[path[-1]])
         path.reverse()
         return path
+
+    def multi_source_tree(self, sources: list[Cell]) -> tuple[dict[Cell, float], dict[Cell, Cell]]:
+        """여러 시작점(source)에서 동시에 퍼져나가는 다익스트라 - "가장 가까운
+        source까지의 거리"와 "그 source 쪽으로 한 걸음 다가가는 이웃"을 격자
+        전체에 대해 한 번에 계산한다.
+
+        2026-08-XX 추가: model.nearest_reachable_gate_path()가 에이전트마다,
+        스텝마다 "직선거리순 게이트 후보 하나씩 전체 격자를 다익스트라로
+        탐색"을 반복해서 시뮬레이션의 압도적 병목이었다(agentCount=200/
+        steps=50 기본 시나리오가 30초 이상 걸려 백엔드 타임아웃을 넘김).
+        게이트 위치는 시나리오 도중 안 바뀌므로(게이트 폐쇄는 스텝 시작 전에
+        한 번만 반영됨), 모든 게이트를 동시에 source로 놓고 격자 전체에 대해
+        "가장 가까운 도달 가능 게이트까지 거리"를 딱 한 번만 계산해두면,
+        이후 각 에이전트는 자기 위치의 값을 조회만 하면 된다 - 격자를 여러 번
+        훑을 필요가 없다. 걸을 수 없는 영역(격리된 섬)에 있는 셀은 결과에
+        아예 안 나타난다(어떤 게이트로도 도달 불가능하다는 뜻).
+        """
+        dist: dict[Cell, float] = {}
+        came_from: dict[Cell, Cell] = {}
+        heap: list[tuple[float, Cell]] = []
+        for src in sources:
+            if self.is_walkable(src) and (src not in dist or 0.0 < dist[src]):
+                dist[src] = 0.0
+                heapq.heappush(heap, (0.0, src))
+
+        visited: set[Cell] = set()
+        while heap:
+            d, current = heapq.heappop(heap)
+            if current in visited:
+                continue
+            visited.add(current)
+
+            cr, cc = current
+            for nxt in self.neighbors8(current):
+                nr, nc = nxt
+                step = math.sqrt(2) if (nr != cr and nc != cc) else 1.0
+                avg_cost = (self.cost[cr][cc] + self.cost[nr][nc]) / 2
+                nd = d + step * avg_cost
+                if nxt not in dist or nd < dist[nxt]:
+                    dist[nxt] = nd
+                    came_from[nxt] = current
+                    heapq.heappush(heap, (nd, nxt))
+
+        return dist, came_from
