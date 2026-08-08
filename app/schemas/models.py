@@ -182,6 +182,8 @@ class ScenarioResult(BaseModel):
     requestedAt: datetime
     frames: list[list[AgentState]]
     pois: list[PoiState] = []
+    # 2026-08-XX 추가: 개입 후 스텝별 위험도 추이(개입 전과 겹쳐 비교용).
+    riskTrend: list[RiskTrendPoint] = []
     evacuationTimeSeconds: int | None
     finalRiskScore: RiskScoreDto
     averageDensity: float
@@ -258,3 +260,5 @@ class PredictResult(BaseModel):
     maxDensityZoneId: int | None = None
     maxDensityZoneName: str | None = None
     evacuatedCount: int = 0
+    # 2026-08-XX 추가: 개입 전 대피 완료 시간(개입 후와 비교용). 대피 없으면 None.
+    evacuationTimeSeconds: int | None = None
