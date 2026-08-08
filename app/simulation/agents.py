@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 from enum import Enum
 
 from mesa import Agent
@@ -82,27 +81,27 @@ class VisitorAgent(Agent):
         # 머물러(STAYING) 화면상 움직이는 사람이 너무 적다는 피드백 반영.
         # 통행형(끝까지 걸어서 통과)을 20%->40%로 늘리고 쇼핑 60%->45%,
         # 맛집투어 20%->15%로 줄여, 항상 상당수가 이동 중이도록 한다.
-        rand_val = random.random()
+        rand_val = self.random.random()
         if rand_val < 0.4:
             self.agent_type = AgentType.PASS_THROUGH
-            self.speed = random.uniform(11.0, 13.0)  # 원래 12.0~14.0에서 -1
+            self.speed = self.random.uniform(11.0, 13.0)  # 원래 12.0~14.0에서 -1
         elif rand_val < 0.85:
             self.agent_type = AgentType.SHOPPING
-            self.speed = random.uniform(7.0, 9.0)  # 원래 8.0~10.0에서 -1
+            self.speed = self.random.uniform(7.0, 9.0)  # 원래 8.0~10.0에서 -1
         else:
             self.agent_type = AgentType.FOOD_TOUR
-            self.speed = random.uniform(7.0, 9.0)  # 원래 8.0~10.0에서 -1
+            self.speed = self.random.uniform(7.0, 9.0)  # 원래 8.0~10.0에서 -1
 
         self.risk_tolerance = (
-            risk_tolerance if risk_tolerance is not None else random.uniform(0.3, 0.9)
+            risk_tolerance if risk_tolerance is not None else self.random.uniform(0.3, 0.9)
         )
         self._path: list[tuple[float, float, int | None]] = []
 
         # 일정 관리
         self.itinerary: list[dict] = []
         self.stay_timer = 0
-        self.wandering_tendency = random.uniform(0.1, 0.3)
-        self.patience_for_waiting = random.randint(15, 30)  # 대기 인원 15~30명 이상이면 포기
+        self.wandering_tendency = self.random.uniform(0.1, 0.3)
+        self.patience_for_waiting = self.random.randint(15, 30)  # 대기 인원 15~30명 이상이면 포기
 
         # 2026-08-XX 추가: 화재 인지 상태. 화재가 나도 즉시 전원이 아는 게 아니라,
         # 화재 지점에서 퍼지는 인지 전선이 자기 위치에 닿아야 True가 되고 대피를
@@ -110,14 +109,14 @@ class VisitorAgent(Agent):
         self.aware_of_fire = False
         # 개인별 반응 지연(거리 m로 환산). 인지 전선이 닿아도 사람마다 조금씩
         # 늦게 반응해서, 딱 떨어진 원이 아니라 자연스럽게 흩어지게 한다.
-        self._fire_jitter = random.uniform(0.0, 12.0)
+        self._fire_jitter = self.random.uniform(0.0, 12.0)
 
         # 2026-08-XX 추가: 쇼핑/맛집 유형이 일정을 다 돌았을 때 바로 퇴장하지
         # 않고 새 목적지를 더 잡아 계속 시장을 돌아다닐 확률. 이 값이 있어야
         # 초반에만 움직이고 곧 다들 멈춰서 시장이 텅 비는 대신, 상당수가
         # 시뮬레이션 내내 매대 사이를 오가며 활기가 유지된다(통행형은 원래
         # 목적이 통과이므로 이 값과 무관하게 반대편 출구로 나간다).
-        self.reshop_probability = random.uniform(0.5, 0.75)
+        self.reshop_probability = self.random.uniform(0.5, 0.75)
 
         # 2026-07-27 추가: 개인별 대피 임계값. ENTERING 종료 시점(_assign_initial_itinerary)에
         # 다시 계산되지만, 그 전에 위험 체크가 들어올 경우를 대비해 기본값도 미리 세팅.
@@ -131,7 +130,7 @@ class VisitorAgent(Agent):
         # 0으로 뚝 떨어지는 동기화 현상이 있었다. 진입 대기 시간을 개인별로
         # 흩어놓아 출발·도착·체류 타이밍을 분산시켜 항상 어느 정도는 이동
         # 중인 사람이 보이게 한다(1스텝=10초, 최소 1스텝은 진입 렌더링 유지).
-        self.enter_timer = random.randint(1, 8)
+        self.enter_timer = self.random.randint(1, 8)
 
     def _assign_initial_itinerary(self):
         # 목적지가 없으면 model에서 POI를 할당받음
@@ -142,14 +141,14 @@ class VisitorAgent(Agent):
                 if g.get("zone_id") != self.zone_id and g.get("zone_id") is not None
             ]
             if other_gates:
-                target_gate = random.choice(other_gates)
+                target_gate = self.random.choice(other_gates)
                 self.itinerary = [{"x": target_gate["x"], "y": target_gate["y"], "zone_id": target_gate["zone_id"]}]
             else:
                 self.itinerary = []
         elif self.agent_type == AgentType.SHOPPING:
-            self.itinerary = self.model.get_random_pois(count=random.randint(1, 3))
+            self.itinerary = self.model.get_random_pois(count=self.random.randint(1, 3))
         elif self.agent_type == AgentType.FOOD_TOUR:
-            self.itinerary = self.model.get_random_pois(count=random.randint(1, 2))
+            self.itinerary = self.model.get_random_pois(count=self.random.randint(1, 2))
 
         self.action_state = ActionState.MOVING
 
@@ -259,11 +258,11 @@ class VisitorAgent(Agent):
         if (
             self.agent_type != AgentType.PASS_THROUGH
             and self.itinerary
-            and random.random() < self.wandering_tendency * 0.1
+            and self.random.random() < self.wandering_tendency * 0.1
         ):
             near_pois = self.model.get_pois_near(self.x, self.y, radius=30.0)
             if near_pois:
-                spontaneous_poi = random.choice(near_pois)
+                spontaneous_poi = self.random.choice(near_pois)
                 # 현재 경로 스택 최상단에 추가
                 self.itinerary.insert(0, spontaneous_poi)
                 self._path = []  # 재계획 유도
@@ -281,7 +280,7 @@ class VisitorAgent(Agent):
             if (
                 self.agent_type != AgentType.PASS_THROUGH
                 and self.state != VisitorState.EVACUATING
-                and random.random() < 0.1  # 10% change of mind
+                and self.random.random() < 0.1  # 10% change of mind
             ):
                 self.action_state = ActionState.MOVING
                 self.itinerary = self.model.get_random_pois(count=1)
@@ -299,9 +298,9 @@ class VisitorAgent(Agent):
             # 멈춰 시장이 비어버리는 문제 해결). 나머지 확률로만 퇴장한다.
             if (
                 self.agent_type != AgentType.PASS_THROUGH
-                and random.random() < self.reshop_probability
+                and self.random.random() < self.reshop_probability
             ):
-                self.itinerary = self.model.get_random_pois(count=random.randint(1, 3))
+                self.itinerary = self.model.get_random_pois(count=self.random.randint(1, 3))
                 if self.itinerary:
                     self.action_state = ActionState.MOVING
                 else:
@@ -402,17 +401,17 @@ class VisitorAgent(Agent):
                             # 내외=5분)에서도 매대 사이를 여러 번 오가는 게
                             # 보이도록 체류 시간을 더 줄였다(1스텝=10초).
                             if self.agent_type == AgentType.FOOD_TOUR:
-                                self.stay_timer = random.randint(12, 24)  # 2~4분
+                                self.stay_timer = self.random.randint(12, 24)  # 2~4분
                             elif self.agent_type == AgentType.SHOPPING:
-                                self.stay_timer = random.randint(6, 15)  # 1~2.5분
+                                self.stay_timer = self.random.randint(6, 15)  # 1~2.5분
                             else:
-                                self.stay_timer = random.randint(2, 4)  # 20~40초
+                                self.stay_timer = self.random.randint(2, 4)  # 20~40초
                             # 2026-08-XX: 유인 오브젝트(행사장/휴게공간)에서는
                             # 사람들이 더 오래 머물러 군집(밀집)이 유지되게 한다.
                             if kind == "event_zone":
-                                self.stay_timer += random.randint(12, 24)  # 행사 관람
+                                self.stay_timer += self.random.randint(12, 24)  # 행사 관람
                             elif kind == "rest_area":
-                                self.stay_timer += random.randint(6, 15)   # 잠깐 휴식
+                                self.stay_timer += self.random.randint(6, 15)   # 잠깐 휴식
             else:
                 ratio = remaining / dist
                 self.x += dx * ratio

@@ -170,6 +170,7 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
     model.target_population = req.agentCount
 
     frames: list[list[dict]] = []
+    risk_trend: list[RiskTrendPoint] = []
     evacuation_seconds: int | None = None
     for step_index in range(req.steps):
         # 2026-07-29 추가: 이벤트가 "시작하자마자 전부 발동"하는 대신, 각자
@@ -183,6 +184,9 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
 
         model.step()
         frames.append(_frame_agents(model))
+        # 2026-08-XX 추가: 개입 후(After)도 스텝별 위험도 추이를 기록해, FE에서
+        # 개입 전(Before)과 겹쳐 비교할 수 있게 한다(개입 전과 동일한 형식).
+        risk_trend.append(_risk_trend_point(model, step_index))
 
         if evacuation_seconds is None and model.ever_evacuating:
             still_evacuating = any(a.state is VisitorState.EVACUATING for a in model.agents)
@@ -223,6 +227,7 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
         scenarioId=scenario_id,
         requestedAt=requested_at,
         frames=frames,
+        riskTrend=risk_trend,
         evacuationTimeSeconds=evacuation_seconds,
         finalRiskScore=RiskScoreDto(
             timestamp=final_timestamp,
@@ -302,6 +307,7 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
 
     frames: list[list[dict]] = []
     risk_trend: list[RiskTrendPoint] = []
+    evacuation_seconds: int | None = None
     for step_index in range(req.steps):
         # 2026-08-XX 추가: 화재 이벤트를 지정된 triggerStep에 발동시킨다.
         # simulate_scenario()의 이벤트 발동 루프와 동일한 로직.
@@ -313,6 +319,14 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
         model.step()
         frames.append(_frame_agents(model))
         risk_trend.append(_risk_trend_point(model, step_index))
+
+        # 2026-08-XX 추가: 개입 전(Before)도 대피 완료 시간을 계산해, 개입 후와
+        # 나란히 비교할 수 있게 한다(scenario와 동일한 판정: 한 번이라도 대피가
+        # 시작됐고 지금은 대피 중인 사람이 없으면 그 시점을 완료로 본다).
+        if evacuation_seconds is None and model.ever_evacuating:
+            still_evacuating = any(a.state is VisitorState.EVACUATING for a in model.agents)
+            if not still_evacuating:
+                evacuation_seconds = (step_index + 1) * STEP_DURATION_SECONDS
 
     total_agent_count = sum(obs.visitor_count for obs in observations.values())
 
@@ -345,4 +359,5 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
         maxDensityZoneId=max_density_zone_id,
         maxDensityZoneName=max_density_zone_name,
         evacuatedCount=model.evacuated_count,
+        evacuationTimeSeconds=evacuation_seconds,
     )

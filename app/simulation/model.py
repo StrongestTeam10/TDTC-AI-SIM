@@ -105,6 +105,14 @@ class MarketLayout:
     """2026-07-25 추가: 시나리오의 일방통행(one_way) 통로 정책으로 막힌 방향.
     (from_zone_id, to_zone_id) 쌍이 여기 있으면 그 방향으로는 이동하지 않는다."""
 
+    _base_walkable_grid: object = field(default=None, repr=False)
+    """2026-08-XX 추가: 배치 오브젝트/통로정책이 반영되기 "전"의 기본 격자
+    (건물만 뺀 자연 상태). 화재 인지(경보) 전파는 이 격자로 계산한다 - 알람/
+    연기/소문 같은 '화재를 알게 되는 것'은 푸드트럭이나 닫힌 통로에 막히지
+    않아야 현실적이기 때문. 오브젝트/폐쇄는 대피 '이동'(walkable_grid)만
+    방해한다. (이걸 안 하면 오브젝트가 인지 전파까지 막아 대피 인원이
+    비현실적으로 줄어 '개입할수록 안전해 보이는' 착시가 생겼다.)"""
+
     # walkable_grid를 오브젝트 배치 반영해서 다시 만들 때 필요한 재료.
     # from_db_rows()에서 채워지고, apply_scenario_overrides()가 재사용한다.
     _walkable_area: object = field(default=None, repr=False)
@@ -298,6 +306,7 @@ class MarketLayout:
             gates=gates,
             pois=pois,
         )
+        layout._base_walkable_grid = walkable_grid  # 오브젝트/폐쇄 반영 전 격자(화재 인지 전파용)
         layout._walkable_area = walkable_area
         layout._base_obstacles = obstacles
         layout._preferred_lines = preferred_lines
@@ -772,8 +781,10 @@ class MarketDigitalTwin(Model):
         반경(AWARENESS_INITIAL_RADIUS + 속도*경과) 이내이면 True. 연소가 끝나면
         (진압) 인지 전선은 더 이상 확산하지 않는다(불이 꺼졌으니 새로 알 사람 없음).
         jitter는 개인별 반응 지연(거리로 환산)이라 다들 정확히 같은 순간에
-        반응하지 않고 자연스럽게 흩어지게 한다."""
-        grid = self.layout.walkable_grid
+        반응하지 않고 자연스럽게 흩어지게 한다.
+
+        인지 거리장을 기본 격자로 계산하므로 에이전트 칸도 같은 기본 격자로 찾는다."""
+        grid = self.layout._base_walkable_grid or self.layout.walkable_grid
         cell = grid._nearest_walkable(grid.to_cell(x, y)) or grid.to_cell(x, y)
         for fire in self.active_fires:
             age = self.current_step - fire["ignite_step"]
@@ -827,11 +838,23 @@ class MarketDigitalTwin(Model):
             # 칸"이 아니라 사람들이 실제로 있는(게이트 도달 가능) 영역의 가장
             # 가까운 칸으로 잡아, 인지가 사람들 사이로 퍼지게 한다.
             if fire.get("dist_field") is None:
-                grid = self.layout.walkable_grid
+                # 인지(경보) 전파는 오브젝트/폐쇄 반영 "전" 기본 격자로 계산한다.
+                # 푸드트럭·닫힌 통로가 화재를 "알게 되는 것"까지 막으면(트럭 뒤
+                # 사람이 화재를 못 알아챔) 비현실적이므로, 경보는 자연 통로로
+                # 퍼지게 하고 오브젝트/폐쇄는 대피 "이동"(walkable_grid)만 막는다.
+                grid = self.layout._base_walkable_grid or self.layout.walkable_grid
+                raw_cell = grid.to_cell(fire["origin_x"], fire["origin_y"])
+                # 2026-08-XX 버그수정: 화재를 통로에서 멀리 떨어진(도로망과 끊긴)
+                # 상가 건물 좌표에 놓으면, _nearest_walkable이 그 건물 옆의 '고립된
+                # 도로 조각'을 집어서 거기서 편 거리장이 사람들(도로)에게 전혀 안
+                # 닿는 문제가 있었다(먼 건물 화재 시 아무도 인지 못 하고 대피 통째
+                # 실패 - 최북단 상가에 불냈을 때 재현됨). 인지 전선의 시작점을 "건물
+                # 옆 아무 칸"이 아니라 사람이 실제로 있는(게이트 도달 가능) 영역의
+                # 가장 가까운 도로 칸으로 잡아, 어느 위치에 불이 나도 인지가 사람들
+                # 사이로 퍼지게 한다. _spawn_agents가 쓰는 것과 동일한 도달 영역.
                 if not self._gate_tree_built:
                     self._build_gate_tree()
                 reachable = set(self._gate_tree[0].keys()) if self._gate_tree else None
-                raw_cell = grid.to_cell(fire["origin_x"], fire["origin_y"])
                 oc = (
                     self._nearest_reachable_cell(raw_cell, reachable)
                     or grid._nearest_walkable(raw_cell)
