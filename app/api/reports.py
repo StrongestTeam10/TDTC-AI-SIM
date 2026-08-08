@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
@@ -18,17 +19,32 @@ router = APIRouter(prefix="/simulation/reports", tags=["simulation-reports"])
 
 # ReportMeta.report_id의 제약과 동일하게 유지할 것. 한쪽만 느슨해지면 그 경로로 뚫린다.
 REPORT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
-service = ReportService(
-    root=settings.project_root,
-    vector_index_path=settings.vector_index_path,
-)
+
+
+@lru_cache(maxsize=1)
+def _get_service() -> ReportService:
+    """ReportService를 최초 사용 시점에 만든다.
+
+    2026-08-08 변경: 원래는 이 모듈 최상단에서 곧바로 생성했다. 그런데 ReportService는
+    생성자에서 벡터 인덱스(knowledge/vector_index.json)를 읽기 때문에, 파일이 없으면
+    모듈 import 자체가 FileNotFoundError로 실패했다. main.py가 이 모듈을 import하므로
+    결국 SIM 서버 전체가 기동하지 못했다(보고서와 무관한 시뮬레이션 API까지 죽었다).
+
+    지연 생성으로 바꿔서, 인덱스가 없어도 서버는 뜨고 보고서 엔드포인트만 실패하게 한다.
+    lru_cache는 예외를 캐시하지 않으므로, 인덱스를 나중에 넣어주면 다음 호출에서 성공한다.
+    """
+
+    return ReportService(
+        root=settings.project_root,
+        vector_index_path=settings.vector_index_path,
+    )
 
 
 def _generate(bundle: DbReportBundle) -> tuple[str, dict[str, str]]:
     """ERD 조회 묶음을 내부 모델로 바꾼 뒤 보고서를 생성한다."""
 
     request = build_report_request(bundle)
-    paths = service.generate(
+    paths = _get_service().generate(
         request,
         settings.output_dir / request.report_id,
     )
@@ -140,9 +156,20 @@ def download_analysis(report_id: str) -> FileResponse:
 
 @router.get("/status")
 def report_status() -> dict:
-    """보고서 검색기와 본문 생성기의 실행 상태를 반환한다."""
+    """보고서 검색기와 본문 생성기의 실행 상태를 반환한다.
+
+    벡터 인덱스가 없으면 ReportService 생성 자체가 실패한다. 그때도 500으로 죽지 않고
+    이유를 그대로 돌려준다 - 보고서 기능을 쓸 수 있는 상태인지 확인하는 용도의
+    엔드포인트이므로, 못 쓰는 이유를 알려주는 것이 본래 목적에 맞다.
+    """
+
+    try:
+        service = _get_service()
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
 
     return {
+        "available": True,
         "retrieval": service.evidence_provider.status(),
         "generation": service.narrative_generator.status(),
     }
