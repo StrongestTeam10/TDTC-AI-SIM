@@ -1,0 +1,34 @@
+# Dockerfile은 requirements.txt 와 app/ 만 COPY하지만, 빌드 컨텍스트는
+# 저장소 전체가 도커 데몬으로 전송된다. 필요 없는 것들을 빼서 전송량을 줄인다.
+#
+# .env 는 .gitignore 대상이라 CI 체크아웃에는 없지만, 로컬에서 docker build 할 때
+# 컨텍스트에 딸려 들어가지 않도록 여기서도 막아둔다.
+
+.git
+.github
+.gitignore
+.dockerignore
+
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# 벡터 인덱스와 원본 PDF는 이미지에 넣지 않는다.
+# 런타임에는 EC2 호스트의 /opt/tdtc-ai/knowledge 를 읽기전용 마운트해서 쓴다.
+# (docker/docker-compose.yml 의 sim 서비스 volumes 참고)
+knowledge/
+scripts/
+data/
+
+tests/
+.idea/
+*.md
+!README.md

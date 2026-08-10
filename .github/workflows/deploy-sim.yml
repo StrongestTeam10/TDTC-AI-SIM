@@ -1,0 +1,247 @@
+# =============================================================================
+# 이 파일을 TDTC-AI-SIM 저장소의 .github/workflows/deploy-sim.yml 로 복사해서 사용합니다.
+# 사전 준비(Environment, Secrets 4개)는 docs/CICD_SETUP.md 참고.
+#
+# 흐름: main push -> 이미지 빌드 & ECR push -> [수동 승인] -> EC2 배포
+#
+# deploy-be.yml 과 구조는 같지만 두 곳이 다릅니다.
+#   1) 헬스체크를 EC2 밖에서 할 수 없습니다.
+#      SIM은 nginx/CloudFront에 연결되어 있지 않고 도커 내부 네트워크에만 있어서
+#      (BE가 http://sim:8000 으로만 호출) 외부에서 curl로 찌를 대상이 없습니다.
+#      그래서 SSM 스크립트 안에서 컨테이너 내부로 확인합니다.
+#   2) 배포 후 호스트 .env 의 SIM_IMAGE 를 새 태그로 갱신합니다.
+#      export만 하면 그 SSM 세션에서만 유효해서, 나중에 누가 EC2에서
+#      docker compose up -d 를 다시 돌리면 옛 이미지로 되돌아갑니다.
+# =============================================================================
+name: Deploy SIM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # 수동 재배포용
+
+env:
+  AWS_REGION: ap-northeast-2
+
+# 배포가 겹치면 컨테이너 상태가 꼬이므로 한 번에 하나만 실행합니다.
+# BE 배포와는 그룹이 다릅니다(서로 다른 서비스를 건드리므로 동시에 돌아도 됩니다).
+concurrency:
+  group: deploy-sim
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 빌드 + ECR push
+  #    주의: 이 job에는 environment를 붙이지 않습니다.
+  #    environment를 붙이면 OIDC sub 클레임이 environment 형식으로 바뀌어
+  #    IAM Role 신뢰 정책(ref:refs/heads/main)과 맞지 않아 assume이 실패합니다.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build & push image
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write # OIDC 토큰 발급에 필요
+
+    # job 출력으로 이미지 주소를 넘기지 않습니다.
+    # ECR_REPOSITORY_URL이 Secret이라, 그 값으로 만든 출력은 GitHub이
+    # "Skip output 'image' since it may contain secret" 으로 폐기합니다.
+    # deploy job은 같은 커밋에서 돌므로 태그를 스스로 계산합니다.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image tag
+        id: meta
+        run: |
+          echo "image=${{ secrets.ECR_REPOSITORY_URL }}:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ secrets.ECR_REPOSITORY_URL }}:latest
+          # GitHub Actions 캐시에 레이어를 보관해 pip 재다운로드를 피합니다.
+          # (requirements.txt 가 안 바뀌면 pip install 레이어가 통째로 재사용됩니다)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # 2) EC2 배포 (수동 승인 게이트)
+  #    environment: production 에 Required reviewers를 걸어두면
+  #    이 job이 시작되기 전에 승인 대기 상태가 됩니다.
+  #
+  #    주의: 이 job에는 environment가 붙어 있어 OIDC sub 클레임이
+  #    ":environment:production" 형식이 됩니다. IAM 신뢰 정책에 그 형식도
+  #    허용되어 있어야 자격증명을 받을 수 있습니다.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to EC2
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write # SSM 호출에 필요한 AWS 자격증명을 OIDC로 받습니다
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy via SSM
+        env:
+          # needs.build.outputs.image 를 쓰지 않습니다.
+          # ECR_REPOSITORY_URL이 Secret이라 그 값이 섞인 job 출력은 GitHub이 버립니다.
+          # 태그는 커밋 SHA 앞 7자로 결정되고 두 job이 같은 커밋에서 돌기 때문에,
+          # 여기서 다시 조립하면 build가 push한 것과 정확히 같은 주소가 됩니다.
+          ECR_REPO: ${{ secrets.ECR_REPOSITORY_URL }}
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ECR_REPO}" ]; then
+            echo "::error::ECR_REPOSITORY_URL Secret이 비어 있습니다."
+            exit 1
+          fi
+          IMAGE="${ECR_REPO}:${GITHUB_SHA::7}"
+
+          # EC2에서 실행할 스크립트.
+          # 따옴표 없는 <<EOF 를 쓰면 러너 쪽 bash가 $i, $(seq ...) 까지 먼저
+          # 전개해버려서 헬스체크 루프가 깨집니다. 따옴표 붙인 <<'REMOTE' 로 원문을
+          # 그대로 두고, 넘겨야 할 값만 앞에 export 두 줄로 붙입니다.
+          PRELUDE="export SIM_IMAGE='${IMAGE}'
+          export DEPLOY_REGION='${AWS_REGION}'"
+
+          REMOTE_SCRIPT=$(cat <<'REMOTE'
+          set -e
+          cd /opt/tdtc-ai
+
+          # ECR 인증은 EC2 인스턴스 프로파일로 처리되므로 자격증명을 넘길 필요가 없습니다.
+          REGISTRY="${SIM_IMAGE%%/*}"
+          aws ecr get-login-password --region "$DEPLOY_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+
+          docker compose pull sim
+          docker compose up -d sim
+          docker image prune -f
+
+          # .env 를 새 태그로 갱신합니다. 이게 없으면 EC2 재부팅이나 수동
+          # docker compose up -d 때 .env 에 남아 있던 옛 이미지로 되돌아갑니다.
+          if grep -q '^SIM_IMAGE=' .env; then
+            sed -i "s|^SIM_IMAGE=.*|SIM_IMAGE=${SIM_IMAGE}|" .env
+          else
+            echo "SIM_IMAGE=${SIM_IMAGE}" >> .env
+          fi
+          # sed -i 는 파일을 새로 만들어 붙이므로 root 소유로 바뀝니다. 되돌려 놓습니다.
+          chown ec2-user:ec2-user .env 2>/dev/null || true
+
+          # ---- 헬스체크 ----
+          # SIM은 외부에 노출되지 않아 컨테이너 안에서 확인합니다.
+          # /health/db 는 RDS 연결까지 봅니다. 실패해도 HTTP 200에 본문만
+          # {"status":"DOWN",...} 이라, 상태코드가 아니라 본문을 봐야 합니다.
+          echo "--- 헬스체크 ---"
+          for i in $(seq 1 30); do
+            sleep 4
+            BODY=$(docker compose exec -T sim python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health/db').read().decode())" 2>/dev/null || true)
+            echo "[$i] ${BODY:-(응답 없음)}"
+            # 지금 FastAPI(JSONResponse)는 separators=(",",":") 라 공백이 없지만,
+            # 나중에 인코더가 바뀌어도 조용히 깨지지 않도록 공백을 지우고 비교합니다.
+            case "$(printf '%s' "$BODY" | tr -d ' ')" in
+              *'"status":"UP"'*)
+                echo "SIM 헬스체크 통과"
+                exit 0
+                ;;
+            esac
+          done
+
+          echo "SIM 헬스체크 실패 - 30회(약 120초) 시도 후 포기"
+          echo "--- 컨테이너 로그 (마지막 50줄) ---"
+          docker compose logs --tail 50 sim || true
+          exit 1
+          REMOTE
+          )
+
+          SCRIPT="${PRELUDE}
+          ${REMOTE_SCRIPT}"
+
+          # jq로 JSON을 만들어 따옴표 이스케이프 문제를 피합니다.
+          PARAMS=$(jq -n --arg s "$SCRIPT" '{commands: ($s | split("\n"))}')
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "deploy sim ${GITHUB_SHA::7}" \
+            --parameters "$PARAMS" \
+            --query "Command.CommandId" --output text)
+          echo "SSM CommandId: $CMD_ID"
+
+          # 원격 스크립트가 헬스체크까지 하므로 BE(최대 300초)보다 넉넉하게 봅니다.
+          STATUS="Pending"
+          for i in $(seq 1 72); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            echo "  [$i] $STATUS"
+            case "$STATUS" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut)
+                echo "::error::배포 실패 ($STATUS)"
+                echo "--- 표준 출력 ---"
+                aws ssm get-command-invocation --command-id "$CMD_ID" \
+                  --instance-id "$INSTANCE_ID" --query "StandardOutputContent" --output text
+                echo "--- 표준 에러 ---"
+                aws ssm get-command-invocation --command-id "$CMD_ID" \
+                  --instance-id "$INSTANCE_ID" --query "StandardErrorContent" --output text
+                exit 1 ;;
+            esac
+          done
+
+          echo "--- 실행 결과 ---"
+          aws ssm get-command-invocation --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" --query "StandardOutputContent" --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::SSM 명령이 6분 안에 끝나지 않았습니다 (마지막 상태: $STATUS)"
+            exit 1
+          fi
+
+      # SIM 컨테이너가 재생성되면 도커 내부 IP가 바뀝니다. BE(JVM)는 성공한 DNS 조회를
+      # 기본 30초간 캐시하므로, 배포 직후 짧게 BE -> SIM 호출이 실패할 수 있습니다.
+      # 여기서 BE 쪽이 실제로 회복됐는지까지 확인합니다.
+      # (BE를 재시작하지는 않습니다. 전체 API가 잠깐 끊기는 쪽이 더 손해입니다)
+      - name: Verify BE can reach SIM
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          echo "BE의 DNS 캐시(약 30초) 만료 대기..."
+          sleep 35
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 5 "http://${EC2_HOST}/actuator/health" | grep -q '"status":"UP"'; then
+              echo "BE 정상 (SIM 재배포 영향 없음)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::BE 헬스체크 실패 - SIM 배포 후 BE가 회복되지 않았습니다"
+          exit 1

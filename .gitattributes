@@ -1,0 +1,14 @@
+# 줄바꿈 고정.
+#
+# 배포 워크플로우(.github/workflows/deploy-sim.yml)는 SSM으로 보낼 셸 스크립트를
+# heredoc(<<'REMOTE' ... REMOTE)으로 만든다. CRLF로 체크아웃되면 종료자가
+# "REMOTE\r" 로 읽혀 heredoc이 안 닫히고 스크립트 전체가 깨진다.
+# 지금은 Linux 러너라 LF로 나오지만, 설정에 기대지 않고 명시해둔다.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.py    text eol=lf
+
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+requirements.txt text eol=lf
