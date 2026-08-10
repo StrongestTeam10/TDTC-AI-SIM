@@ -1,6 +1,14 @@
 mesa[rec]==3.5.1
 fastapi==0.139.2
 uvicorn[standard]>=0.30
+
+# app/api/policy.py 가 Form/File/UploadFile 을 쓴다. FastAPI는 멀티파트 파싱을
+# 이 패키지에 위임하는데, 코드에서 직접 import하지 않아 빠져도 눈에 띄지 않는다.
+# 없으면 임포트 시점에 죽는다(라우트 호출 때가 아니라 서버 기동 자체가 실패):
+#   RuntimeError: Form data requires "python-multipart" to be installed.
+# 0.0.18 에서 잘못된 멀티파트 요청으로 CPU를 태우는 문제(CVE-2024-53981)가 고쳐졌다.
+python-multipart>=0.0.18
+
 pydantic>=2.7
 shapely>=2.0
 networkx>=3.2
