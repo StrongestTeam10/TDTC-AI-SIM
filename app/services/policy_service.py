@@ -3,10 +3,11 @@ import json
 from google import genai
 from google.genai import types
 from app.schemas.policy_schema import PolicyExtractionResult
+from fastapi import UploadFile, HTTPException
 
-async def analyze_policy_text(policy_text: str) -> PolicyExtractionResult:
+async def analyze_policy_multimodal(policy_text: str, file: UploadFile | None) -> PolicyExtractionResult:
     """
-    공문 텍스트를 LLM으로 분석하여 시뮬레이션 설정(Pydantic 스키마)으로 변환합니다.
+    공문 텍스트 및 파일을 LLM으로 분석하여 시뮬레이션 설정(Pydantic 스키마)으로 변환합니다.
     """
     # API 키 설정
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -17,7 +18,7 @@ async def analyze_policy_text(policy_text: str) -> PolicyExtractionResult:
     
     prompt = f"""
     너는 재난 대피 시뮬레이션 파라미터 변환기야.
-    아래에 제공된 '공문 텍스트'를 읽고, 시뮬레이션에 적용할 제약 조건들을 추출해줘.
+    아래에 제공된 '공문 텍스트'와 '첨부 문서'를 읽고, 시뮬레이션에 적용할 제약 조건들을 추출해줘.
     반드시 아래 제공된 JSON Schema 구조에 맞게 완벽한 JSON 형식으로만 응답해야 해.
     
     [JSON Schema]
@@ -34,9 +35,32 @@ async def analyze_policy_text(policy_text: str) -> PolicyExtractionResult:
     {policy_text}
     """
     
+    contents = [prompt]
+    
+    if file:
+        file_bytes = await file.read()
+        filename = file.filename.lower()
+        
+        if filename.endswith(".pdf"):
+            contents.append(types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"))
+        elif filename.endswith((".png", ".jpg", ".jpeg")):
+            mime_type = "image/png" if filename.endswith(".png") else "image/jpeg"
+            contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
+        elif filename.endswith(".docx"):
+            try:
+                import docx
+                import io
+                doc = docx.Document(io.BytesIO(file_bytes))
+                docx_text = "\n".join([para.text for para in doc.paragraphs])
+                contents.append(f"\n[첨부문서(DOCX) 내용]\n{docx_text}")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail="DOCX 문서를 읽을 수 없거나 손상되었습니다.")
+        else:
+            raise HTTPException(status_code=400, detail="지원하지 않는 파일 형식입니다. (지원: PDF, DOCX, PNG, JPG)")
+            
     response = await client.aio.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=prompt,
+        model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        contents=contents,
         config=types.GenerateContentConfig(
             temperature=0.1,
             response_mime_type="application/json"
