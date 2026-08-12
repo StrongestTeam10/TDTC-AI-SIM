@@ -199,10 +199,12 @@ class PredictRequest(BaseModel):
 
     2026-08-XX 변경: 이제 ScenarioRequest(After)와 같은 방식으로 초기
     인원을 구역 면적 비례로 배치한다(자세한 이유는 simulate.py
-    simulate_predict()의 docstring 참고) - 오브젝트/이벤트 개입이 없으면
-    Before/After가 완전히 동일하게 동작해야 "무엇이 개입 때문에 달라졌는지"를
-    비교할 수 있기 때문이다. 오브젝트 배치/통로정책/게이트 폐쇄는 여전히
-    ScenarioRequest(After) 전용이다.
+    simulate_predict()의 docstring 참고).
+
+    2026-08-12 변경: 오브젝트 배치/통로정책도 Before가 받는다. 시장 구조 등록에서
+    저장한 "현행"을 개입 전(Before)에도 반영해, Before가 실제 시장 모습이 되도록
+    한다. Before/After 차이는 사용자가 After에서 삭제/추가한 개입분에서만 나온다.
+    (게이트 폐쇄는 이전부터 Before가 받고 있었다.)
     """
 
     marketId: int
@@ -222,12 +224,15 @@ class PredictRequest(BaseModel):
             "게이트로 서서히 유입되지 않는다 - After와 동일한 기준선으로 비교하기 위함."
         ),
     )
-    # 2026-08-XX 추가: 이벤트(화재)만 Before/After 양쪽에 동일하게 배치
-    # 가능해야 해서 여기도 받는다. 오브젝트/통로정책은 여전히 ScenarioRequest 전용.
+    # 2026-08-XX 추가: 이벤트(화재)를 Before/After 양쪽에 동일하게 배치.
     events: list[EventTrigger] = Field(default_factory=list)
     # 2026-08-XX 추가: 게이트 개폐는 개입 전/후 독립적으로 조절 가능해야 해서
     # Before(predict)도 닫힌 게이트 목록을 받는다(FE에서 양쪽 지도 각각 클릭 토글).
     closedGateIds: list[int] = Field(default_factory=list)
+    # 2026-08-12 추가: 현행 오브젝트/통로정책(시장 구조 등록에서 저장한 것).
+    # ScenarioRequest와 동일하게 apply_scenario_overrides로 반영된다.
+    objects: list[PlacedObject] = Field(default_factory=list)
+    corridorPolicies: list[CorridorPolicy] = Field(default_factory=list)
     seed: int | None = None
 
 

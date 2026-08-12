@@ -268,13 +268,15 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
     이제 totalInflow(FE에서는 "인원 수" 입력값)를 ScenarioRequest.agentCount와
     동일하게 "구역 면적 비례로 시작 시점에 한 번에 배치하는 인원 수"로 다루고,
     실행 중 게이트로 서서히 유입되는 로직(inject_inflow)은 더 이상 쓰지 않는다.
-    시드도 명시적으로 안 주면 scenario와 같은 42를 써서, 오브젝트/통로정책/
-    게이트폐쇄/이벤트가 전부 없으면 두 시뮬레이션이 프레임 단위로 완전히
-    동일하게 나온다 - 그 상태에서 오브젝트나 이벤트를 하나씩 넣어봤을 때
-    달라지는 부분만 순수하게 그 개입의 효과라고 볼 수 있게 하기 위함이다.
-    오브젝트/통로정책/게이트폐쇄는 여전히 ScenarioRequest(After) 전용이다 -
-    Before/After 차이를 보려는 목적이므로 개입 수단 자체는 After에만 있어야
-    비교가 성립한다. capturedAt은 더 이상 초기 배치에 쓰이지 않는다(과거
+    시드도 명시적으로 안 주면 scenario와 같은 42를 쓴다. 따라서 개입 전과 후에
+    동일한 입력(현행)을 주면 두 시뮬레이션이 프레임 단위로 완전히 동일하게 나오고,
+    After에서 사용자가 오브젝트/통로정책/게이트를 삭제·추가한 부분만 순수하게 그
+    개입의 효과로 드러난다.
+
+    2026-08-12 변경: 오브젝트 배치/통로정책도 Before가 받는다(objects/corridorPolicies).
+    시장 구조 등록에서 저장한 "현행"을 개입 전에도 반영해야 Before가 실제 시장 모습이
+    되고, 비교가 "현행 vs 현행+개입"으로 성립하기 때문이다. (게이트 폐쇄는 이전부터
+    Before가 반영하고 있었다.) capturedAt은 더 이상 초기 배치에 쓰이지 않는다(과거
     요청과의 하위 호환을 위해 필드는 남겨둠).
     """
     requested_at = datetime.now(timezone.utc)
@@ -284,6 +286,8 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
 
     layout = _load_layout(req.marketId)
 
+    # 2026-08-12: 현행 오브젝트/통로정책을 Before에도 반영(scenario와 동일 순서).
+    apply_scenario_overrides(layout, req.objects, req.corridorPolicies)
     # 2026-08-XX: 게이트 개폐는 개입 전/후 독립적으로 조절 가능하므로 Before도 반영.
     apply_gate_closures(layout, set(req.closedGateIds))
 
