@@ -20,7 +20,11 @@ class Settings:
     vector_index_path: Path = Path(os.getenv("REPORT_VECTOR_INDEX_PATH", str(PROJECT_ROOT / "knowledge" / "vector_index.json"),))
 
 
-    db_host: str = os.getenv("SIM_DB_HOST", "aws-0-ap-northeast-1.pooler.supabase.com")
+    # 기본값을 두지 않는다. 예전엔 Supabase 호스트가 기본값이었는데, 그러면
+    # SIM_DB_HOST가 누락돼도 조용히 (이미 RDS로 이관되어 폐기 예정인) Supabase에
+    # 붙어버린다 - 실패해야 할 상황에서 엉뚱한 DB로 붙는 쪽이 더 위험하다.
+    # 비어 있으면 init_pool()이 명확한 에러로 막는다(app/db/connection.py).
+    db_host: str = os.getenv("SIM_DB_HOST", "")
     db_port: int = int(os.getenv("SIM_DB_PORT", "5432"))
     db_name: str = os.getenv("SIM_DB_NAME", "postgres")
     db_user: str = os.getenv("SIM_DB_USER", "")

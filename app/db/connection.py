@@ -1,4 +1,4 @@
-"""PostgreSQL(Supabase) 커넥션 관리."""
+"""PostgreSQL(RDS) 커넥션 관리."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -15,6 +15,10 @@ _pool: SimpleConnectionPool | None = None
 def init_pool(minconn: int = 1, maxconn: int = 5) -> None:
     global _pool
     if _pool is None:
+        if not settings.db_host:
+            raise RuntimeError(
+                "SIM_DB_HOST가 설정되지 않았습니다. .env 에 RDS 엔드포인트를 채우세요."
+            )
         _pool = SimpleConnectionPool(minconn, maxconn, dsn=settings.dsn)
 
 

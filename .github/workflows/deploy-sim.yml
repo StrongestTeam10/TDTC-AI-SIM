@@ -145,21 +145,17 @@ jobs:
           docker compose up -d sim
           docker image prune -f
 
-          # .env 를 새 태그로 갱신합니다. 이게 없으면 EC2 재부팅이나 수동
-          # docker compose up -d 때 .env 에 남아 있던 옛 이미지로 되돌아갑니다.
-          if grep -q '^SIM_IMAGE=' .env; then
-            sed -i "s|^SIM_IMAGE=.*|SIM_IMAGE=${SIM_IMAGE}|" .env
-          else
-            echo "SIM_IMAGE=${SIM_IMAGE}" >> .env
-          fi
-          # sed -i 는 파일을 새로 만들어 붙이므로 root 소유로 바뀝니다. 되돌려 놓습니다.
-          chown ec2-user:ec2-user .env 2>/dev/null || true
-
           # ---- 헬스체크 ----
+          # .env 갱신은 이 아래(통과한 뒤)에서 합니다. 여기서 실패하면 .env는
+          # 이전 이미지를 계속 가리키고, 이후 EC2 재부팅이나 수동
+          # docker compose up -d 는 (배포에 실패한 새 이미지가 아니라)
+          # 마지막으로 정상 확인된 이미지로 뜹니다.
+          #
           # SIM은 외부에 노출되지 않아 컨테이너 안에서 확인합니다.
           # /health/db 는 RDS 연결까지 봅니다. 실패해도 HTTP 200에 본문만
           # {"status":"DOWN",...} 이라, 상태코드가 아니라 본문을 봐야 합니다.
           echo "--- 헬스체크 ---"
+          HEALTHY=0
           for i in $(seq 1 30); do
             sleep 4
             BODY=$(docker compose exec -T sim python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health/db').read().decode())" 2>/dev/null || true)
@@ -169,15 +165,28 @@ jobs:
             case "$(printf '%s' "$BODY" | tr -d ' ')" in
               *'"status":"UP"'*)
                 echo "SIM 헬스체크 통과"
-                exit 0
+                HEALTHY=1
+                break
                 ;;
             esac
           done
 
-          echo "SIM 헬스체크 실패 - 30회(약 120초) 시도 후 포기"
-          echo "--- 컨테이너 로그 (마지막 50줄) ---"
-          docker compose logs --tail 50 sim || true
-          exit 1
+          if [ "$HEALTHY" -ne 1 ]; then
+            echo "SIM 헬스체크 실패 - 30회(약 120초) 시도 후 포기"
+            echo "--- 컨테이너 로그 (마지막 50줄) ---"
+            docker compose logs --tail 50 sim || true
+            exit 1
+          fi
+
+          # .env 를 새 태그로 갱신합니다. 이게 없으면 EC2 재부팅이나 수동
+          # docker compose up -d 때 .env 에 남아 있던 옛 이미지로 되돌아갑니다.
+          if grep -q '^SIM_IMAGE=' .env; then
+            sed -i "s|^SIM_IMAGE=.*|SIM_IMAGE=${SIM_IMAGE}|" .env
+          else
+            echo "SIM_IMAGE=${SIM_IMAGE}" >> .env
+          fi
+          # sed -i 는 파일을 새로 만들어 붙이므로 root 소유로 바뀝니다. 되돌려 놓습니다.
+          chown ec2-user:ec2-user .env 2>/dev/null || true
           REMOTE
           )
 
