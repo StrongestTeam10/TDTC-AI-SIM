@@ -59,7 +59,7 @@ async def analyze_policy_multimodal(policy_text: str, file: UploadFile | None) -
             raise HTTPException(status_code=400, detail="지원하지 않는 파일 형식입니다. (지원: PDF, DOCX, PNG, JPG)")
             
     response = await client.aio.models.generate_content(
-        model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        model=os.getenv("GEMINI_MODEL"),
         contents=contents,
         config=types.GenerateContentConfig(
             temperature=0.1,
