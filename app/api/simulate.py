@@ -19,7 +19,6 @@ from app.schemas.models import (
     SnapshotResponse,
     ZoneRiskPoint,
 )
-from app.simulation.agents import VisitorState
 from app.simulation.model import (
     MarketDigitalTwin,
     MarketLayout,
@@ -73,6 +72,19 @@ def _load_layout(market_id: int) -> MarketLayout:
     return MarketLayout.from_db_rows(market, zones, adjacency, gates, stalls, buildings)
 
 
+def _build_observed_positions(layout, observed_agents) -> dict[int, list[tuple[float, float]]]:
+    """2026-08-12: BE가 보낸 관측 초기 위치(zoneId, lat, lon)를 구역별 로컬 좌표로 변환.
+
+    비어 있으면 빈 dict(=관측 배치 없음, 유입만). 구역 폴리곤 밖 좌표는 배치 시 걸을 수
+    있는 칸으로 스냅되므로 여기선 그대로 넘긴다.
+    """
+    result: dict[int, list[tuple[float, float]]] = {}
+    for a in observed_agents:
+        x, y = layout.projection.to_local(a.latitude, a.longitude)
+        result.setdefault(a.zoneId, []).append((x, y))
+    return result
+
+
 @router.post("/snapshot", response_model=SnapshotResponse)
 def simulate_snapshot(req: SnapshotRequest) -> SnapshotResponse:
     layout = _load_layout(req.marketId)
@@ -119,14 +131,15 @@ def _frame_agents(model: MarketDigitalTwin) -> list[dict]:
     projection = model.layout.projection
     frame = []
     for agent in model.agents:
-        lat, lon = projection.to_latlon(agent.x, agent.y)
-        frame.append(
-            {
-                **agent.to_dict(),
-                "latitude": round(lat, 8),
-                "longitude": round(lon, 8),
-            }
-        )
+        d = agent.to_dict()
+        # 2026-08-14 버그수정: FE는 에이전트를 latitude/longitude로 그린다. to_dict의
+        # x/y는 이미 표시용(레인 분산) 좌표이므로 lat/lon도 그 좌표에서 변환해야 화면에
+        # 분산이 나타난다. 예전엔 raw agent.x/y로 변환해, 레인 분산이 화면에 전혀 반영
+        # 안 되고 '줄줄이 소시지'로 보였다(표시 x/y와 lat/lon이 서로 다른 좌표였음).
+        lat, lon = projection.to_latlon(d["x"], d["y"])
+        d["latitude"] = round(lat, 8)
+        d["longitude"] = round(lon, 8)
+        frame.append(d)
     return frame
 
 
@@ -165,9 +178,18 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
         for zid in zone_ids
     }
 
-    model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=42)
+    model = MarketDigitalTwin(
+        layout, observations, mode=SimulationMode.SCENARIO, seed=42,
+        observed_positions=_build_observed_positions(layout, req.observedAgents),
+    )
     # 2026-08-XX: 평상시(화재 없음) 유동인구를 이 목표치 근처로 유지한다.
-    model.target_population = req.agentCount
+    # 2026-08-14: agentCount는 '추가 유입 인원'(관측 인원 위에 더해지는 수)이다.
+    # 추가 유입 > 0이면 유지 목표를 (관측 인원 + 추가 유입)으로 잡아 사람이 나가도
+    # 관측분이 빠지지 않고 합쳐서 유지된다. 0이면 유지하지 않아(target=0), 관측된
+    # 현재 인원이 신규 유입 없이 자연히 이동·퇴장하는 것만 본다(UI 설명과 일치).
+    model.target_population = (
+        req.agentCount + len(req.observedAgents) if req.agentCount > 0 else 0
+    )
 
     frames: list[list[dict]] = []
     risk_trend: list[RiskTrendPoint] = []
@@ -188,8 +210,16 @@ def simulate_scenario(req: ScenarioRequest) -> ScenarioResult:
         # 개입 전(Before)과 겹쳐 비교할 수 있게 한다(개입 전과 동일한 형식).
         risk_trend.append(_risk_trend_point(model, step_index))
 
-        if evacuation_seconds is None and model.ever_evacuating:
-            still_evacuating = any(a.state is VisitorState.EVACUATING for a in model.agents)
+        # 2026-08-14: 대피 완료 판정을 '화재 종료(fire_is_burning=False) + 화재를
+        # 인지한 사람이 전원 퇴장'으로 강화한다. 예전엔 인지가 물결처럼 퍼지는
+        # 도중 '지금 대피 중 0명'인 틈(첫 대피자는 나갔고 다음 무리는 아직 인지
+        # 못 함)에 완료로 확정돼 대피시간이 실제보다 짧게 찍혔고, 그 틈이 게이트
+        # 구성에 따라 달라져 개입 전/후가 서로 다른 규칙으로 찍혀 비교가 오염됐다.
+        # 연소가 끝나면 새로 인지하는 사람이 없으므로(agents.py) 이때부터만 본다.
+        # 상태(EVACUATING)가 아니라 aware_of_fire로 세어, 밀집 대피자는 완료 판정을
+        # 방해하지 않는다(화재 대피 전용 지표).
+        if evacuation_seconds is None and model.ever_evacuating and not model.fire_is_burning:
+            still_evacuating = any(a.aware_of_fire for a in model.agents)
             if not still_evacuating:
                 evacuation_seconds = (step_index + 1) * STEP_DURATION_SECONDS
 
@@ -305,9 +335,17 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
     }
 
     seed = req.seed if req.seed is not None else 42
-    model = MarketDigitalTwin(layout, observations, mode=SimulationMode.SCENARIO, seed=seed)
+    model = MarketDigitalTwin(
+        layout, observations, mode=SimulationMode.SCENARIO, seed=seed,
+        observed_positions=_build_observed_positions(layout, req.observedAgents),
+    )
     # 2026-08-XX: 평상시 유동인구를 이 목표치 근처로 유지한다.
-    model.target_population = req.totalInflow
+    # 2026-08-14: totalInflow는 '추가 유입 인원'(관측 인원 위에 더해지는 수)이다.
+    # 0보다 크면 (관측 인원 + 추가 유입)을 유지하고, 0이면 유지하지 않아 관측 인원이
+    # 자연히 빠진다(scenario와 동일).
+    model.target_population = (
+        req.totalInflow + len(req.observedAgents) if req.totalInflow > 0 else 0
+    )
 
     frames: list[list[dict]] = []
     risk_trend: list[RiskTrendPoint] = []
@@ -324,11 +362,12 @@ def simulate_predict(req: PredictRequest) -> PredictResult:
         frames.append(_frame_agents(model))
         risk_trend.append(_risk_trend_point(model, step_index))
 
-        # 2026-08-XX 추가: 개입 전(Before)도 대피 완료 시간을 계산해, 개입 후와
-        # 나란히 비교할 수 있게 한다(scenario와 동일한 판정: 한 번이라도 대피가
-        # 시작됐고 지금은 대피 중인 사람이 없으면 그 시점을 완료로 본다).
-        if evacuation_seconds is None and model.ever_evacuating:
-            still_evacuating = any(a.state is VisitorState.EVACUATING for a in model.agents)
+        # 2026-08-14: 개입 전(Before)도 개입 후(scenario)와 동일하게 강화된 판정을
+        # 쓴다 - '화재 종료(fire_is_burning=False) + 화재를 인지한 사람 전원 퇴장'.
+        # 예전의 '대피 중 0명' 즉시 확정은 인지 전파 도중 생기는 틈에 조기 확정돼
+        # 개입 전/후가 서로 다른 규칙으로 찍혀 비교가 오염됐다(scenario 주석 참고).
+        if evacuation_seconds is None and model.ever_evacuating and not model.fire_is_burning:
+            still_evacuating = any(a.aware_of_fire for a in model.agents)
             if not still_evacuating:
                 evacuation_seconds = (step_index + 1) * STEP_DURATION_SECONDS
 

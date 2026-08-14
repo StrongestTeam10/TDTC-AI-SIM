@@ -582,6 +582,7 @@ class MarketDigitalTwin(Model):
         mode: SimulationMode = SimulationMode.MIRROR,
         placement_strategy: PlacementStrategy = PlacementStrategy.CENTERLINE,
         seed: int | None = None,
+        observed_positions: dict[int, list[tuple[float, float]]] | None = None,
     ) -> None:
         super().__init__(seed=seed)
         self.layout = layout
@@ -589,6 +590,11 @@ class MarketDigitalTwin(Model):
         self.mode = mode
         self.placement_strategy = placement_strategy
         self._rng = random.Random(seed)
+
+        # 2026-08-12 추가(CCTV 관측 초기배치): 구역별 관측 위치(로컬 x,y). 있으면 그 자리에
+        # 먼저 배치하고, 유입 인원(observations.visitor_count)을 그 위에 추가로 채운다.
+        # 없으면(기존 동작) 유입만으로 배치.
+        self.observed_positions = observed_positions or {}
 
         self._risk: dict[int, RiskAssessment] = {}
 
@@ -676,6 +682,26 @@ class MarketDigitalTwin(Model):
                         return cand
         return None
 
+    def _nearest_free_reachable_cell(self, cell, reachable, occupied, max_radius: int = 60):
+        """2026-08-12 추가(겹침 회피): 도달 가능하면서 '아직 아무도 안 놓인' 가장 가까운 칸.
+
+        _nearest_reachable_cell과 같은 나선 탐색이되, 이미 찬 칸(occupied)은 건너뛴다.
+        여러 사람이 같은 지점(관측 클러스터)으로 와도 각자 옆 빈 칸에 배치되어 겹치지
+        않는다. 탐색 순서가 고정이라 결정적(개입 전/후 동일 결과 보장). 없으면 None.
+        """
+        if cell in reachable and cell not in occupied:
+            return cell
+        row, col = cell
+        for r in range(1, max_radius + 1):
+            for dr in range(-r, r + 1):
+                for dc in range(-r, r + 1):
+                    if max(abs(dr), abs(dc)) != r:
+                        continue
+                    cand = (row + dr, col + dc)
+                    if cand in reachable and cand not in occupied:
+                        return cand
+        return None
+
     def _spawn_agents(self) -> None:
         """
         2026-08-XX 수정: 스폰 지점이 걸을 수 없는 칸이면 가장 가까운 걸을 수
@@ -691,7 +717,34 @@ class MarketDigitalTwin(Model):
             self._build_gate_tree()
         reachable = set(self._gate_tree[0].keys()) if self._gate_tree else None
 
+        # 2026-08-12: 이미 사람이 놓인 칸 집합. 여러 명이 같은 지점으로 와도 겹치지
+        # 않고 옆 빈 칸에 배치하기 위해(관측 클러스터/유입 공통). 배치 순서가 고정이라
+        # 개입 전/후가 같은 결과를 낸다.
+        occupied: set = set()
+
+        def spawn_at(zone_id: int, x: float, y: float) -> None:
+            # 스폰 지점을 게이트 도달 가능한 '빈' 칸으로 스냅한다(겹침 회피).
+            cell = grid.to_cell(x, y)
+            if reachable is not None:
+                target = self._nearest_free_reachable_cell(cell, reachable, occupied)
+            else:
+                # 게이트 도달성 트리를 못 쓰는 드문 경우(일방통행 등)는 기존 스냅으로 폴백.
+                target = self._nearest_reachable_cell(cell, reachable)
+            if target is not None:
+                occupied.add(target)
+                x, y = grid.to_point(target)
+            else:
+                x, y = self.random_point_in_zone(zone_id)
+            VisitorAgent(self, zone_id=zone_id, x=x, y=y)
+
         for zone_id, spec in self.layout.zones.items():
+            # 1) 관측(CCTV) 위치를 먼저 그 자리에 배치 (기본 배치). 실제로 본 사람이라
+            #    유입 상한과 무관하게 전부 놓는다.
+            for ox, oy in self.observed_positions.get(zone_id, []):
+                spawn_at(zone_id, ox, oy)
+
+            # 2) 유입 인원(면적 비례)을 그 위에 추가로 채운다(랜덤). 관측과 별개(additive) -
+            #    유입 0이면 관측된 사람만, 관측이 없으면 유입만(기존 동작).
             obs = self.observations.get(zone_id)
             count = obs.visitor_count if obs else 0
             if count <= 0:
@@ -704,13 +757,7 @@ class MarketDigitalTwin(Model):
                 seed=self._rng.randint(0, 2**31 - 1),
             )
             for x, y in points:
-                cell = grid.to_cell(x, y)
-                target = self._nearest_reachable_cell(cell, reachable)
-                if target is not None:
-                    x, y = grid.to_point(target)
-                else:
-                    x, y = self.random_point_in_zone(zone_id)
-                VisitorAgent(self, zone_id=zone_id, x=x, y=y)
+                spawn_at(zone_id, x, y)
 
     def evaluate_risk(self) -> dict[int, RiskAssessment]:
         """현재 상태 기준으로 구역별 위험도를 재계산한다.
@@ -1184,14 +1231,14 @@ class MarketDigitalTwin(Model):
         projection = self.layout.projection
         agents = []
         for agent in self.agents:
-            lat, lon = projection.to_latlon(agent.x, agent.y)
-            agents.append(
-                {
-                    **agent.to_dict(),
-                    "latitude": round(lat, 8),
-                    "longitude": round(lon, 8),
-                }
-            )
+            d = agent.to_dict()
+            # 2026-08-14 버그수정: FE가 latitude/longitude로 그리므로, lat/lon도 to_dict의
+            # 표시용 x/y(레인 분산 반영)에서 변환한다. 예전엔 raw x/y로 변환해 레인 분산이
+            # 화면에 안 나타났다(_frame_agents와 동일 수정).
+            lat, lon = projection.to_latlon(d["x"], d["y"])
+            d["latitude"] = round(lat, 8)
+            d["longitude"] = round(lon, 8)
+            agents.append(d)
 
         counts = self.current_zone_counts()
         zones = []
