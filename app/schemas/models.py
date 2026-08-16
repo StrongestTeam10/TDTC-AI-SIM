@@ -77,6 +77,18 @@ class EventTrigger(BaseModel):
         12, ge=0, description="진압 후 위험도가 0으로 감쇠하며 복구되는 스텝 수. 기본 12(약 2분)"
     )
 
+class ObservedAgent(BaseModel):
+    """2026-08-12: CCTV 관측 기반 초기배치용 에이전트 1명의 지도 좌표.
+
+    BE가 각 구역의 현재 프레임 사람 픽셀좌표를 그 구역 CCTV 4점 폴리곤에 비례
+    매핑(bilinear)해 만든 근사 위치. SIM은 projection.to_local(lat, lon)으로 로컬
+    미터로 바꿔 초기 배치에 쓴다(관측=기본 배치, 그 위에 유입 인원을 추가로 채움).
+    """
+    zoneId: int
+    latitude: float
+    longitude: float
+
+
 class ScenarioRequest(BaseModel):
     """파이프라인 B: 사용자 지정 시나리오 요청.
 
@@ -87,12 +99,18 @@ class ScenarioRequest(BaseModel):
     """
 
     marketId: int
-    agentCount: int = Field(..., ge=1, le=100_000)
+    # 2026-08-14: agentCount는 '추가 유입 인원'. 0 허용 — 0이면 관측(CCTV 초기배치)
+    # 인원만으로 시뮬을 돌린다(추가 유입 없음).
+    agentCount: int = Field(..., ge=0, le=100_000)
     steps: int = Field(50, ge=1, le=1000)
     objects: list[PlacedObject] = Field(default_factory=list)
     corridorPolicies: list[CorridorPolicy] = Field(default_factory=list)
     events: list[EventTrigger] = Field(default_factory=list)
     closedGateIds: list[int] = Field(default_factory=list)
+    # 2026-08-12 추가: 프레임 선택 기준 시각(BE에서 이미 프레임 선택에 사용, SIM은 무시).
+    capturedAt: datetime | None = None
+    # 2026-08-12 추가: CCTV 관측 초기배치(BE 조립). 비면 유입만으로 배치(기존 동작).
+    observedAgents: list[ObservedAgent] = Field(default_factory=list)
 
 
 class RiskBreakdown(BaseModel):
@@ -233,6 +251,8 @@ class PredictRequest(BaseModel):
     # ScenarioRequest와 동일하게 apply_scenario_overrides로 반영된다.
     objects: list[PlacedObject] = Field(default_factory=list)
     corridorPolicies: list[CorridorPolicy] = Field(default_factory=list)
+    # 2026-08-12 추가: CCTV 관측 초기배치(BE 조립). 개입 전/후 동일하게 주입된다.
+    observedAgents: list[ObservedAgent] = Field(default_factory=list)
     seed: int | None = None
 
 

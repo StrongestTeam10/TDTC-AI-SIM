@@ -52,6 +52,11 @@ class VisitorAgent(Agent):
     60~90점 사이로 다르게 잡아서, 위험이 예민한 사람부터 먼저 반응하고 둔감한
     사람은 늦게 반응하는 식으로 서서히 퍼지게 한다(임의 튜닝값)."""
 
+    LANE_HALF_WIDTH_M = 2.4
+    """2026-08-14: 대피 겹침 완화용 표시 좌우 확산의 최대 반폭(m). 통로가 좁으면
+    _display_position이 walkable한 선까지 자동으로 줄인다. 표시 전용이라 시뮬
+    좌표(self.x/y)·밀집도·경로엔 영향 없다."""
+
     DENSITY_ONLY_EVACUATION_MARGIN = 15.0
     """2026-08-XX 추가: 화재 등 명시적 이벤트의 영향이 전혀 없는 구역(순수
     밀집도만으로 위험도가 오른 경우)에는 대피 임계값에 이 값을 더해서 덜
@@ -96,6 +101,17 @@ class VisitorAgent(Agent):
             risk_tolerance if risk_tolerance is not None else self.random.uniform(0.3, 0.9)
         )
         self._path: list[tuple[float, float, int | None]] = []
+
+        # 2026-08-13(레인 오프셋)/2026-08-14(겹침 완화 개선): 통로에서 한 줄로 쏠려
+        # 걷는(줄줄이 소시지) 걸 완화하기 위해, 표시(렌더) 좌표만 흩어놓는다. 예전엔
+        # 5개 고정 레인(±1.4m)이라 대피처럼 사람이 몰리면 같은 레인에 여러 명이 겹쳤고,
+        # 옆칸이 벽이면 중앙으로 확 붙어 다시 겹쳤다. 이제 unique_id로 좌우 위치(lane_frac,
+        # 연속값 -1~1)와 진행방향 앞뒤 어긋남(lane_stagger)을 줘, 통로 폭을 연속으로 채우고
+        # 같은 줄에 딱 맞춰 서지 않게 한다. ⚠️ 시뮬 좌표(self.x/y)는 절대 안 바꾼다 -
+        # 밀집도·대피·경로는 원래 좌표 그대로. unique_id 기반이라 결정적(개입 전/후 동일).
+        self._lane_frac = ((self.unique_id * 2654435761) % 1024) / 1024.0 * 2.0 - 1.0  # ~[-1,1)
+        self._lane_stagger = (((self.unique_id * 40503) % 1024) / 1024.0 - 0.5) * 1.4  # ~±0.7m
+        self._heading: tuple[float, float] | None = None  # 최근 이동 방향(단위벡터)
 
         # 일정 관리
         self.itinerary: list[dict] = []
@@ -176,11 +192,16 @@ class VisitorAgent(Agent):
         if not self.aware_of_fire and self.model.fire_is_burning:
             if self.model.fire_front_reached(self.x, self.y, self._fire_jitter):
                 self.aware_of_fire = True
+                # 2026-08-14: 화재 대피 지표(ever_evacuating/evacuated_count/
+                # evacuationTimeSeconds)는 '화재를 인지한 순간' 각 사람당 1회만
+                # 집계한다. 상태(state)가 아니라 인지 전이로 세므로, 밀집으로
+                # 이미 EVACUATING이던 사람이 뒤늦게 화재를 알아도 누락 없이
+                # 정확히 1회 잡힌다(밀집 대피와 분리 - 아래 밀집 분기 참고).
+                self.model.ever_evacuating = True
+                self.model.evacuated_count += 1
 
         if self.aware_of_fire:
             if self.state is not VisitorState.EVACUATING:
-                self.model.ever_evacuating = True
-                self.model.evacuated_count += 1
                 self.state = VisitorState.EVACUATING
                 self.action_state = ActionState.EXITING
                 self.itinerary = []  # 남은 쇼핑/관광 일정 폐기
@@ -213,8 +234,10 @@ class VisitorAgent(Agent):
         # 1. Situation 평가 (위험도) - 순수 밀집도 기반
         if density_evacuate or self.state is VisitorState.EVACUATING:
             if self.state is not VisitorState.EVACUATING:
-                self.model.ever_evacuating = True
-                self.model.evacuated_count += 1
+                # 2026-08-14: 순수 밀집 대피는 화재 대피 지표에 넣지 않는다. 화재가
+                # 전혀 없는 붐비는 상황(밀집도만으로 임계 초과)을 "대피 발생/미완료"로
+                # 오표기하던 문제를 막는다. 사람은 여전히 혼잡을 피해 빠져나가지만
+                # (행동 유지), evacuationTimeSeconds/evacuatedCount는 화재 전용이다.
                 # 대피가 방금 시작된 시점이면 원래 경로를 버리고 게이트로 새 경로.
                 self._path = []
             self.state = VisitorState.EVACUATING
@@ -372,6 +395,10 @@ class VisitorAgent(Agent):
             dx, dy = target_x - self.x, target_y - self.y
             dist = (dx * dx + dy * dy) ** 0.5
 
+            # 2026-08-13(레인 오프셋): 표시용 좌우 치우침의 기준이 되는 진행 방향 저장.
+            if dist > 1e-9:
+                self._heading = (dx / dist, dy / dist)
+
             if dist <= remaining or dist == 0:
                 self.x, self.y = target_x, target_y
                 if arrive_zone is not None and arrive_zone != self.zone_id:
@@ -450,12 +477,38 @@ class VisitorAgent(Agent):
             # 이미 게이트에 도달 -> 실제로 퇴장(소멸)
             self.remove()
 
+    def _display_position(self) -> tuple[float, float]:
+        """2026-08-14: 표시용 좌표. 걷는 중이면 (1) 진행방향 앞뒤로 살짝 어긋내 같은 줄에
+        딱 맞춰 서지 않게 하고, (2) 좌우로 통로 폭만큼 연속 분산시켜 겹침을 푼다. 원하는
+        좌우 오프셋이 통로 밖이면 walkable한 선까지 크기를 줄여가며 최대한 벌린다(예전처럼
+        중앙으로 확 붙지 않음). ⚠️ 시뮬 좌표(self.x/y)는 안 바뀐다 - 밀집도·대피·경로엔
+        원래 좌표가 쓰인다. 어디로도 못 벌리면 원래 좌표 그대로.
+        """
+        if not self._path or self._heading is None:
+            return self.x, self.y
+        hx, hy = self._heading
+        px, py = -hy, hx  # 진행 방향에 수직(좌우)
+        grid = self.model.layout.walkable_grid
+        # (1) 진행 방향 앞뒤 어긋냄 - 같은 진행위치에 나란히 겹치는 걸 깬다.
+        bx = self.x + hx * self._lane_stagger
+        by = self.y + hy * self._lane_stagger
+        # (2) 원하는 좌우 오프셋에서 시작해, 통로 밖이면 점점 줄여 walkable한 최대치를 쓴다.
+        want = self._lane_frac * self.LANE_HALF_WIDTH_M
+        for scale in (1.0, 0.7, 0.45, 0.25):
+            off = want * scale
+            cx = bx + px * off
+            cy = by + py * off
+            if grid.is_walkable(grid.to_cell(cx, cy)):
+                return cx, cy
+        return self.x, self.y
+
     def to_dict(self) -> dict:
+        disp_x, disp_y = self._display_position()
         return {
             "agentId": self.unique_id,
             "zoneId": self.zone_id,
-            "x": round(self.x, 3),
-            "y": round(self.y, 3),
+            "x": round(disp_x, 3),
+            "y": round(disp_y, 3),
             "state": self.state.value,
             "agentType": self.agent_type.value,
             "actionState": self.action_state.value,

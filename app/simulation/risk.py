@@ -171,10 +171,15 @@ def assess_zone(
     # 안전 오버라이드:
     # 밀집도 단독으로 임계를 넘으면 다른 지표와 무관하게 등급을 강제 상향한다.
     # 압사는 밀집도만으로도 발생하므로, 종합 점수 평균에 희석되어선 안 된다.
+    # 2026-08-14: 등급을 올릴 때 종합 점수(score)도 그 등급의 하한까지 끌어올린다.
+    # 예전엔 level만 올리고 score는 그대로여서, FE가 구역을 빨강(HIGH)으로 칠하면서
+    # 숫자는 48점처럼 낮게 표시하는 색↔숫자 불일치가 생겼다(FE는 색=level, 숫자=score).
     if density >= DENSITY_CRITICAL:
         level = RiskLevel.CRITICAL
+        total = max(total, 75.0)
     elif density >= DENSITY_CAPACITY and level in (RiskLevel.LOW, RiskLevel.MEDIUM):
         level = RiskLevel.HIGH
+        total = max(total, 50.0)
 
     return RiskAssessment(
         zone_id=zone_id,
