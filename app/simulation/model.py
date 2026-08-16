@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 from dataclasses import dataclass, field
@@ -32,6 +33,9 @@ from app.simulation.space import (
     parse_linestring,
     parse_polygon,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class SimulationMode(str, Enum):
@@ -231,20 +235,7 @@ class MarketLayout:
         # corridor_polys_by_edge에 보관한다(apply_scenario_overrides가 사용).
         walkable_area = unary_union([z.polygon_local for z in zones.values()])
 
-        building_polys: list[Polygon] = []
-        for row in building_rows:
-            poly_wgs = row.get("polygon_coordinates")
-            if not poly_wgs:
-                continue
-            try:
-                building_polys.append(projection.polygon_to_local(parse_polygon(poly_wgs)))
-            except Exception:
-                continue
-        if building_polys:
-            try:
-                walkable_area = walkable_area.difference(unary_union(building_polys))
-            except Exception:
-                pass
+        walkable_area = _subtract_buildings(walkable_area, building_rows, projection)
 
         corridor_polys_by_edge: dict[frozenset[int], list[Polygon]] = {}
         for row in adjacency_rows:
@@ -345,6 +336,107 @@ CLOSE_BOUNDARY_WALL_WIDTH_M = 3.0
 """2026-08-XX 추가: 통로정책 close가 두 구역 경계선을 막을 때 쓰는 벽 두께(m).
 격자 셀 크기(1m)보다 충분히 두꺼워야 대각선 이동으로 살짝 빠져나가는 것도
 확실히 막힌다."""
+
+
+def _repair_polygon(poly: Polygon) -> Polygon | None:
+    """
+    자기교차(self-intersecting) 링을 shapely가 다룰 수 있는 형태로 고친다.
+
+    공공 공간정보(브이월드·국토부)에서 받은 건물/지적 폴리곤에는 자기교차가 흔하다.
+    그런 도형이 하나라도 섞이면 unary_union이나 difference가 예외를 던진다.
+    buffer(0)은 그걸 유효한 도형으로 재구성하는 표준 기법이다.
+    고칠 수 없으면 None을 준다.
+    """
+    try:
+        repaired = poly.buffer(0)
+    except Exception:
+        return None
+    if repaired.is_empty or not repaired.is_valid:
+        return None
+    return repaired
+
+
+def _subtract_buildings(walkable_area, building_rows: list[dict], projection) -> "Polygon":
+    """
+    걸을 수 있는 영역에서 건물이 차지하는 자리를 뺀다.
+
+    2026-08-14 재작성. 이전 구현은 두 지점에서 조용히 실패했다.
+      (1) 파싱에 실패한 건물을 로그 없이 건너뛰었고,
+      (2) union/difference가 한 번이라도 터지면 `except: pass`로 건물 '전체'가 무시됐다.
+
+    (2)가 특히 위험했다. 건물이 하나도 안 빠진 채로 시뮬레이션이 돌지만, 지도(FE)는
+    같은 데이터를 BE에서 따로 받아 그리므로 화면에는 건물이 멀쩡히 보인다. 밀집도·
+    대피 수치만 조용히 틀리고, 로그가 없어 알아챌 방법이 없었다. 외부 API로 건물을
+    자동 적재하기 시작하면 도형 품질을 우리가 통제할 수 없어 더 자주 터진다.
+
+    이제 (a) 깨진 도형은 buffer(0)으로 복구를 시도하고, (b) 한꺼번에 빼기가 실패하면
+    하나씩 빼는 방식으로 물러서며, (c) 몇 개가 반영됐는지 남긴다.
+    """
+    total = len(building_rows)
+    if total == 0:
+        return walkable_area
+
+    building_polys: list[Polygon] = []
+    failed = 0
+    repaired = 0
+
+    for row in building_rows:
+        poly_wgs = row.get("polygon_coordinates")
+        if not poly_wgs:
+            failed += 1
+            continue
+        try:
+            poly = projection.polygon_to_local(parse_polygon(poly_wgs))
+        except Exception:
+            failed += 1
+            continue
+
+        if not poly.is_valid:
+            fixed = _repair_polygon(poly)
+            if fixed is None:
+                failed += 1
+                continue
+            poly = fixed
+            repaired += 1
+
+        building_polys.append(poly)
+
+    if not building_polys:
+        logger.warning("건물 %d개 중 쓸 수 있는 폴리곤이 없어 이동 영역에 반영하지 못했습니다.", total)
+        return walkable_area
+
+    try:
+        result = walkable_area.difference(unary_union(building_polys))
+        applied = len(building_polys)
+    except Exception:
+        # 도형 하나가 union을 깨뜨려도 나머지를 버리지 않는다.
+        result = walkable_area
+        applied = 0
+        for poly in building_polys:
+            try:
+                result = result.difference(poly)
+                applied += 1
+            except Exception:
+                continue
+        logger.warning(
+            "건물을 한꺼번에 빼지 못해 하나씩 처리했습니다(%d/%d 반영).", applied, len(building_polys)
+        )
+
+    # 건물이 구역을 통째로 덮어버리면 에이전트가 설 자리가 없어진다. 그 상태로 돌면
+    # "결과가 비어 있다"는 증상만 남고 원인이 안 보이므로, 차라리 건물 반영을 접는다.
+    if result.is_empty:
+        logger.warning(
+            "건물 %d개를 빼고 나니 걸을 수 있는 영역이 남지 않아, 건물 반영을 취소합니다. "
+            "구역 폴리곤과 건물 좌표계가 맞는지 확인이 필요합니다.",
+            applied,
+        )
+        return walkable_area
+
+    logger.info(
+        "건물 %d개 중 %d개를 이동 영역에서 제외했습니다(복구 %d, 실패 %d).",
+        total, applied, repaired, failed,
+    )
+    return result
 
 
 def apply_scenario_overrides(
