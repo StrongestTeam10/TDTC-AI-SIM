@@ -774,14 +774,24 @@ class MarketDigitalTwin(Model):
                         return cand
         return None
 
-    def _nearest_free_reachable_cell(self, cell, reachable, occupied, max_radius: int = 60):
-        """2026-08-12 추가(겹침 회피): 도달 가능하면서 '아직 아무도 안 놓인' 가장 가까운 칸.
+    # 2026-08-19: 앵커에서 사람을 밀어낼 수 있는 최대 반경(칸=1m).
+    # 오브젝트에 깔린 사람을 그 가장자리로 비켜서게 하는 용도라 넓을 필요가 없다.
+    # 너무 크게 잡으면 막힌 구역의 사람이 먼 구역까지 날아가 "한쪽이 텅 비는" 그림이 된다.
+    RELOCATE_MAX_RADIUS_M = 25
 
-        _nearest_reachable_cell과 같은 나선 탐색이되, 이미 찬 칸(occupied)은 건너뛴다.
-        여러 사람이 같은 지점(관측 클러스터)으로 와도 각자 옆 빈 칸에 배치되어 겹치지
-        않는다. 탐색 순서가 고정이라 결정적(개입 전/후 동일 결과 보장). 없으면 None.
+    def _free_cell_near(self, grid, cell, allowed, occupied, max_radius: int):
+        """cell에서 가장 가까운 '배치 가능하고 아직 비어 있는' 칸.
+
+        allowed가 None이면 격자의 보행 가능 여부만 보고, 집합이 주어지면 그 안에
+        드는 칸만 고른다(게이트 도달 가능 칸 집합). 나선 탐색 순서가 고정이라
+        같은 입력이면 항상 같은 결과가 나온다.
         """
-        if cell in reachable and cell not in occupied:
+        def ok(c) -> bool:
+            if c in occupied:
+                return False
+            return grid.is_walkable(c) if allowed is None else (c in allowed)
+
+        if ok(cell):
             return cell
         row, col = cell
         for r in range(1, max_radius + 1):
@@ -790,50 +800,68 @@ class MarketDigitalTwin(Model):
                     if max(abs(dr), abs(dc)) != r:
                         continue
                     cand = (row + dr, col + dc)
-                    if cand in reachable and cand not in occupied:
+                    if ok(cand):
                         return cand
         return None
 
     def _spawn_agents(self) -> None:
         """
-        2026-08-XX 수정: 스폰 지점이 걸을 수 없는 칸이면 가장 가까운 걸을 수
-        있는 칸으로 스냅한다.
+        2026-08-19 재작성: 개입 전/후 초기 배치를 최대한 일치시킨다.
 
-        2026-08-XX 추가: 끼임(갇힘) 방지. 장애물이 통로를 막아 생긴 '고립
-        포켓'에 스폰되면 어디로도 못 가므로, 게이트에서 실제로 도달 가능한
-        칸에만 스폰한다(게이트 도달성 트리의 도달 칸 집합 사용). 일방통행
-        정책 등으로 트리를 못 쓸 때만 일반 walkable 스냅으로 폴백한다.
+        이전에는 배치를 '개입이 반영된 격자'에서 한 번에 끝냈다. 그런데 개입
+        전/후는 오브젝트·통로정책·게이트 폐쇄가 달라 격자 자체가 서로 다르게
+        구워진다. 그래서 무작위 추첨(시드 42)과 관측 프레임이 완전히 같아도,
+        스냅되는 칸이 달라져 배치가 어긋났다. 게다가 이미 찬 칸을 피하는
+        occupied 규칙 때문에 한 명이 밀리면 그 뒤 사람이 연쇄로 밀려서, 좁고
+        긴 골목형 시장에서는 오브젝트 하나가 통로 전체의 배치를 흔들었다.
+
+        이제 두 단계로 나눈다.
+
+          1단계(앵커) - 개입이 반영되기 전의 기본 격자(_base_walkable_grid)에서
+            자리를 잡는다. 이 격자는 시장 DB 데이터로만 만들어져 개입 전/후가
+            항상 동일하다. 따라서 앵커 좌표도 양쪽이 완전히 같다.
+
+          2단계(보정) - 실제 격자에서 그 앵커가 그대로 유효한 사람은 손대지 않고
+            먼저 자리를 확정한다. 그다음 오브젝트에 깔렸거나 고립 포켓에 빠진
+            사람만 주변 빈 칸으로 비켜세운다.
+
+        유효한 사람을 먼저 확정하는 순서가 핵심이다. 섞어서 처리하면 밀려난
+        사람이 멀쩡한 사람의 칸을 뺏어 연쇄가 다시 살아난다. 이 순서 덕분에
+        '개입에 물리적으로 막히지 않은 사람은 개입 전/후 같은 자리'가 보장되고,
+        차이는 오브젝트 주변에만 국소적으로 남는다.
+
+        앵커 좌표는 칸 번호가 아니라 미터 좌표로 넘긴다 - 통로 폐쇄로 보행
+        영역이 줄면 격자 경계(origin/bounds)가 바뀌어 같은 칸 번호가 서로 다른
+        위치를 가리키기 때문이다.
         """
         grid = self.layout.walkable_grid
+        base_grid = self.layout._base_walkable_grid or grid
         if not self._gate_tree_built:
             self._build_gate_tree()
         reachable = set(self._gate_tree[0].keys()) if self._gate_tree else None
 
-        # 2026-08-12: 이미 사람이 놓인 칸 집합. 여러 명이 같은 지점으로 와도 겹치지
-        # 않고 옆 빈 칸에 배치하기 위해(관측 클러스터/유입 공통). 배치 순서가 고정이라
-        # 개입 전/후가 같은 결과를 낸다.
-        occupied: set = set()
+        # ── 1단계: 앵커(개입 전/후 공통) ────────────────────────────
+        base_occupied: set = set()
+        anchors: list[tuple[int, float, float]] = []
 
-        def spawn_at(zone_id: int, x: float, y: float) -> None:
-            # 스폰 지점을 게이트 도달 가능한 '빈' 칸으로 스냅한다(겹침 회피).
-            cell = grid.to_cell(x, y)
-            if reachable is not None:
-                target = self._nearest_free_reachable_cell(cell, reachable, occupied)
-            else:
-                # 게이트 도달성 트리를 못 쓰는 드문 경우(일방통행 등)는 기존 스냅으로 폴백.
-                target = self._nearest_reachable_cell(cell, reachable)
-            if target is not None:
-                occupied.add(target)
-                x, y = grid.to_point(target)
-            else:
-                x, y = self.random_point_in_zone(zone_id)
-            VisitorAgent(self, zone_id=zone_id, x=x, y=y)
+        def anchor_at(zone_id: int, x: float, y: float) -> None:
+            cell = base_grid.to_cell(x, y)
+            target = self._free_cell_near(
+                base_grid, cell, None, base_occupied, self.RELOCATE_MAX_RADIUS_M
+            )
+            if target is None:
+                # 기본 격자에서도 자리를 못 찾는 극단적인 경우. 원점 좌표를 그대로 둔다.
+                anchors.append((zone_id, x, y))
+                return
+            base_occupied.add(target)
+            ax, ay = base_grid.to_point(target)
+            anchors.append((zone_id, ax, ay))
 
         for zone_id, spec in self.layout.zones.items():
             # 1) 관측(CCTV) 위치를 먼저 그 자리에 배치 (기본 배치). 실제로 본 사람이라
             #    유입 상한과 무관하게 전부 놓는다.
             for ox, oy in self.observed_positions.get(zone_id, []):
-                spawn_at(zone_id, ox, oy)
+                anchor_at(zone_id, ox, oy)
 
             # 2) 유입 인원(면적 비례)을 그 위에 추가로 채운다(랜덤). 관측과 별개(additive) -
             #    유입 0이면 관측된 사람만, 관측이 없으면 유입만(기존 동작).
@@ -849,7 +877,42 @@ class MarketDigitalTwin(Model):
                 seed=self._rng.randint(0, 2**31 - 1),
             )
             for x, y in points:
-                spawn_at(zone_id, x, y)
+                anchor_at(zone_id, x, y)
+
+        # ── 2단계: 실제 격자로 보정 ─────────────────────────────────
+        occupied: set = set()
+        placed: list[tuple[int, float, float] | None] = [None] * len(anchors)
+        pending: list[int] = []
+
+        # 2-a) 앵커가 그대로 유효한 사람부터 자리를 확정한다(개입 전/후 동일 좌표).
+        for i, (zone_id, ax, ay) in enumerate(anchors):
+            cell = grid.to_cell(ax, ay)
+            valid = (cell in reachable) if reachable is not None else grid.is_walkable(cell)
+            if valid and cell not in occupied:
+                occupied.add(cell)
+                px, py = grid.to_point(cell)
+                placed[i] = (zone_id, px, py)
+            else:
+                pending.append(i)
+
+        # 2-b) 오브젝트에 깔렸거나 갇힌 사람만 가장 가까운 빈 칸으로 비켜세운다.
+        for i in pending:
+            zone_id, ax, ay = anchors[i]
+            cell = grid.to_cell(ax, ay)
+            target = self._free_cell_near(
+                grid, cell, reachable, occupied, self.RELOCATE_MAX_RADIUS_M
+            )
+            if target is not None:
+                occupied.add(target)
+                px, py = grid.to_point(target)
+                placed[i] = (zone_id, px, py)
+            else:
+                px, py = self.random_point_in_zone(zone_id)
+                placed[i] = (zone_id, px, py)
+
+        for entry in placed:
+            zone_id, px, py = entry  # type: ignore[misc]
+            VisitorAgent(self, zone_id=zone_id, x=px, y=py)
 
     def evaluate_risk(self) -> dict[int, RiskAssessment]:
         """현재 상태 기준으로 구역별 위험도를 재계산한다.
