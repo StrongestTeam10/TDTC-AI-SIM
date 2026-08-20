@@ -52,6 +52,15 @@ class VisitorAgent(Agent):
     60~90점 사이로 다르게 잡아서, 위험이 예민한 사람부터 먼저 반응하고 둔감한
     사람은 늦게 반응하는 식으로 서서히 퍼지게 한다(임의 튜닝값)."""
 
+    MAX_DISPLAY_SHIFT_M = 0.6
+    """2026-08-20: 표시 오프셋이 한 스텝에 바뀔 수 있는 최대 거리(m).
+
+    좌우 오프셋의 기준축은 진행 방향의 수직(-hy, hx)이라, 사람이 방향을 틀면
+    축이 통째로 회전해 오프셋이 반대편으로 넘어간다. 최대 2 x LANE_HALF_WIDTH_M
+    (4.8m)를 한 프레임에 건너뛰어 화면에서 옆으로 순간이동하는 것처럼 보였다.
+    변화량을 이 값으로 묶어 여러 스텝에 걸쳐 옮겨가게 한다.
+    표시 전용이라 self.x/y 와 밀집도·대피 계산에는 영향이 없다."""
+
     LANE_HALF_WIDTH_M = 2.4
     """2026-08-14: 대피 겹침 완화용 표시 좌우 확산의 최대 반폭(m). 통로가 좁으면
     _display_position이 walkable한 선까지 자동으로 줄인다. 표시 전용이라 시뮬
@@ -112,6 +121,10 @@ class VisitorAgent(Agent):
         self._lane_frac = ((self.unique_id * 2654435761) % 1024) / 1024.0 * 2.0 - 1.0  # ~[-1,1)
         self._lane_stagger = (((self.unique_id * 40503) % 1024) / 1024.0 - 0.5) * 1.4  # ~±0.7m
         self._heading: tuple[float, float] | None = None  # 최근 이동 방향(단위벡터)
+        # 2026-08-20: 마지막으로 화면에 적용한 표시 오프셋(표시좌표 - 시뮬좌표).
+        # 걷다 멈추는 순간 오프셋이 0으로 돌아가 옆으로 미끄러지던 것을 막는다.
+        # 표시 전용이며 self.x/y 와는 무관하다(_display_position 참고).
+        self._last_display_delta: tuple[float, float] = (0.0, 0.0)
 
         # 일정 관리
         self.itinerary: list[dict] = []
@@ -483,24 +496,52 @@ class VisitorAgent(Agent):
         좌우 오프셋이 통로 밖이면 walkable한 선까지 크기를 줄여가며 최대한 벌린다(예전처럼
         중앙으로 확 붙지 않음). ⚠️ 시뮬 좌표(self.x/y)는 안 바뀐다 - 밀집도·대피·경로엔
         원래 좌표가 쓰인다. 어디로도 못 벌리면 원래 좌표 그대로.
+
+        2026-08-20 수정 - 표시 좌표가 프레임마다 옆으로 튀던 것을 잡는다.
+          (1) 경로가 비면(목적지 도착 · 체류 · 진입 대기) 오프셋을 0으로 되돌리는
+              대신 마지막에 쓰던 오프셋을 유지한다. 예전에는 걷다 멈추는 순간
+              최대 LANE_HALF_WIDTH_M(2.4m)만큼 옆으로 미끄러졌다.
+          (2) 통로가 좁아 오프셋을 줄일 때 단계가 (1.0, 0.7, 0.45, 0.25)로 성겨서,
+              프레임마다 다른 단계가 뽑히면 좌우로 덜컹거렸다. 촘촘하게 나눈다.
         """
-        if not self._path or self._heading is None:
+        grid = self.model.layout.walkable_grid
+
+        def hold() -> tuple[float, float]:
+            """직전 오프셋을 그대로 유지한다. 그 자리가 통로 밖이면 원좌표."""
+            dx, dy = self._last_display_delta
+            if dx == 0.0 and dy == 0.0:
+                return self.x, self.y
+            cx, cy = self.x + dx, self.y + dy
+            if grid.is_walkable(grid.to_cell(cx, cy)):
+                return cx, cy
             return self.x, self.y
+
+        if not self._path or self._heading is None:
+            return hold()
+
         hx, hy = self._heading
         px, py = -hy, hx  # 진행 방향에 수직(좌우)
-        grid = self.model.layout.walkable_grid
         # (1) 진행 방향 앞뒤 어긋냄 - 같은 진행위치에 나란히 겹치는 걸 깬다.
         bx = self.x + hx * self._lane_stagger
         by = self.y + hy * self._lane_stagger
         # (2) 원하는 좌우 오프셋에서 시작해, 통로 밖이면 점점 줄여 walkable한 최대치를 쓴다.
         want = self._lane_frac * self.LANE_HALF_WIDTH_M
-        for scale in (1.0, 0.7, 0.45, 0.25):
+        ox, oy = self._last_display_delta
+        for scale in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1):
             off = want * scale
-            cx = bx + px * off
-            cy = by + py * off
+            dx = (bx + px * off) - self.x
+            dy = (by + py * off) - self.y
+            # 오프셋이 한 번에 반대편으로 넘어가지 않도록 변화량을 묶는다.
+            mx, my = dx - ox, dy - oy
+            shift = (mx * mx + my * my) ** 0.5
+            if shift > self.MAX_DISPLAY_SHIFT_M:
+                k = self.MAX_DISPLAY_SHIFT_M / shift
+                dx, dy = ox + mx * k, oy + my * k
+            cx, cy = self.x + dx, self.y + dy
             if grid.is_walkable(grid.to_cell(cx, cy)):
+                self._last_display_delta = (dx, dy)
                 return cx, cy
-        return self.x, self.y
+        return hold()
 
     def to_dict(self) -> dict:
         disp_x, disp_y = self._display_position()
