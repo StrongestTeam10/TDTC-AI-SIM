@@ -68,7 +68,7 @@ def parse_polygon(geojson_text: str | dict) -> Polygon:
 def parse_linestring(geojson_text: str | dict) -> LineString:
     """
     통로 중심선(mrkadjc01m.path_coordinates, GeoJSON LineString 문자열)을
-    shapely LineString으로 변환. 2026-07-24 추가.
+    shapely LineString으로 변환.
     GeoJSON 좌표 순서는 [경도, 위도]임에 주의.
     """
     data = json.loads(geojson_text) if isinstance(geojson_text, str) else geojson_text

@@ -39,11 +39,6 @@ EGRESS_TIME_CRITICAL_SEC = 300.0  # 대피 소요 5분 이상이면 병목 최�
 
 # ---- 종합 점수 가중치 ----
 # 밀집도가 압사 위험의 직접 원인이므로 지배적 비중을 둔다.
-# 2026-07-23: 레이더(이동 흐름)/음향 센서를 완전히 제거하기로 결정하면서
-# WEIGHT_FLOW(0.20)/WEIGHT_ACOUSTIC(0.15)도 함께 삭제했다. 남은 두 지표(밀집도/병목)의
-# 가중치 값 자체는 그대로 두고, 기존에 있던 "결측 지표 제외 후 재정규화" 로직을 그대로
-# 재사용해 두 지표만으로 100%를 채우도록 했다 (밀집도 0.55 : 병목 0.10 비율 유지,
-# 실질 반영 비율은 84.6% : 15.4%).
 WEIGHT_DENSITY = 0.55
 WEIGHT_BOTTLENECK = 0.10  # 통로 폭 대비 부하
 
@@ -157,7 +152,6 @@ def assess_zone(
 
     # 가중치 재정규화:
     # 통로 폭 데이터가 없으면 병목 지표를 제외하고 밀집도 100%로 계산한다.
-    # (레이더/음향 지표는 2026-07-23부로 완전히 제거되어 애초에 계산 대상이 아님)
     components: list[tuple[float, float]] = [(d_score, WEIGHT_DENSITY)]
     if path_width_m:
         components.append((b_score, WEIGHT_BOTTLENECK))
@@ -171,9 +165,7 @@ def assess_zone(
     # 안전 오버라이드:
     # 밀집도 단독으로 임계를 넘으면 다른 지표와 무관하게 등급을 강제 상향한다.
     # 압사는 밀집도만으로도 발생하므로, 종합 점수 평균에 희석되어선 안 된다.
-    # 2026-08-14: 등급을 올릴 때 종합 점수(score)도 그 등급의 하한까지 끌어올린다.
-    # 예전엔 level만 올리고 score는 그대로여서, FE가 구역을 빨강(HIGH)으로 칠하면서
-    # 숫자는 48점처럼 낮게 표시하는 색↔숫자 불일치가 생겼다(FE는 색=level, 숫자=score).
+    # 등급 상향 시 종합 점수도 그 등급의 하한까지 함께 끌어올린다 (색↔숫자 불일치 방지).
     if density >= DENSITY_CRITICAL:
         level = RiskLevel.CRITICAL
         total = max(total, 75.0)
