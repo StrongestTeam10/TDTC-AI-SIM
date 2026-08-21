@@ -29,5 +29,15 @@ async def analyze_policy(
     except HTTPException as he:
         raise he
     except Exception as e:
+        # 사용량 한도(429)는 서버 장애가 아니라 "잠시 뒤 다시" 상황이므로 구분해서 올린다.
+        # 전부 500으로 뭉개면 BE가 502로 바꾸고, 화면에는 원인 없는 오류만 남는다.
+        status = getattr(e, "code", None) or getattr(e, "status_code", None)
+        if status == 429 or "RESOURCE_EXHAUSTED" in str(e):
+            logger.warning(f"LLM 사용량 한도 초과: {e}")
+            raise HTTPException(
+                status_code=429,
+                detail="AI 분석 사용량 한도를 초과했습니다. 잠시 후 다시 시도해주세요.",
+            )
+
         logger.error(f"LLM Policy Analysis Error: {e}")
         raise HTTPException(status_code=500, detail=f"LLM 분석 중 오류가 발생했습니다: {str(e)}")
