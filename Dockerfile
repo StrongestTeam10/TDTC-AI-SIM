@@ -9,10 +9,13 @@ WORKDIR /app
 # DejaVu Sans로 대체하기 때문이다(숫자·날짜만 멀쩡하고 한글만 깨지는 증상).
 # charting.py의 configure_korean_font()가 후보로 찾는 경로
 # /usr/share/fonts/truetype/nanum/NanumGothic.ttf 가 이 패키지로 생긴다.
+#
+# fc-cache 는 부르지 않는다. fontconfig 패키지가 slim 이미지에 없어 빌드가 깨지고
+# (fc-cache: not found), charting.py 가 fontManager.addfont(절대경로) 로 폰트를
+# 직접 등록하므로 fontconfig 캐시 자체가 필요 없다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libgeos-dev libpq-dev fonts-nanum \
- && rm -rf /var/lib/apt/lists/* \
- && fc-cache -f
+ && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
