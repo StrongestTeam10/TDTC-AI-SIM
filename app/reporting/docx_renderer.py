@@ -54,6 +54,10 @@ class DocxReportRenderer:
                 narrative.evidence_notes,
             )
         self._appendix(document)
+        # 표는 행이 동적으로 늘어나므로, 모든 섹션을 만든 뒤 마지막에 한 번에 건다.
+        # (표를 만드는 자리마다 거는 것보다 누락이 없다)
+        for table in document.tables:
+            self._keep_table_together(table)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             document.save(output_path)
@@ -99,10 +103,46 @@ class DocxReportRenderer:
             tc_pr.append(shd)
         shd.set(qn("w:fill"), fill)
 
+    @staticmethod
+    def _keep_table_together(table) -> None:
+        """표가 페이지 경계에서 쪼개지지 않게 한다.
+
+        2026-08-20: 머리행만 앞 페이지에 남고 데이터 행은 다음 장으로 넘어가,
+        빈 표 머리만 덩그러니 보이는 문제가 있었다. 보고서의 표는 모두 3~5행으로
+        짧아 한 페이지에 들어가므로, 통째로 넘기는 편이 항상 읽기 좋다.
+
+        세 가지를 함께 건다.
+          - cantSplit : 한 행이 위아래로 잘리지 않게 한다.
+          - keepNext  : 마지막 행을 뺀 모든 행을 "다음과 함께" 두어 표 전체를 묶는다.
+                        (표에는 문단 단위 속성밖에 없어 행 안의 문단에 건다)
+          - tblHeader : 그럼에도 넘칠 만큼 표가 길어지면 머리행을 각 페이지에 반복한다.
+        """
+
+        rows = table.rows
+        for index, row in enumerate(rows):
+            tr_pr = row._tr.get_or_add_trPr()
+
+            if tr_pr.find(qn("w:cantSplit")) is None:
+                tr_pr.append(OxmlElement("w:cantSplit"))
+
+            if index == 0 and tr_pr.find(qn("w:tblHeader")) is None:
+                tr_pr.append(OxmlElement("w:tblHeader"))
+
+            # 마지막 행까지 keepNext를 걸면 표 다음 문단까지 끌고 올라가므로 제외한다.
+            if index < len(rows) - 1:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        paragraph.paragraph_format.keep_with_next = True
+
     def _add_heading(self, document: Document, text: str, level: int = 1) -> None:
         paragraph = document.add_heading(text, level=level)
         paragraph.paragraph_format.space_before = Pt(12)
         paragraph.paragraph_format.space_after = Pt(6)
+        # 2026-08-20: 제목이 페이지 맨 아래에 혼자 남고 본문만 다음 장으로 넘어가는
+        # 것(고아 제목)을 막는다. keep_with_next는 바로 다음 문단과 같은 페이지에
+        # 두게 하고, keep_together는 제목 자체가 두 줄로 쪼개지는 것을 막는다.
+        paragraph.paragraph_format.keep_with_next = True
+        paragraph.paragraph_format.keep_together = True
 
     def _add_bullets(
         self,
@@ -398,7 +438,11 @@ class DocxReportRenderer:
             path = charts.get(key)
             if path and Path(path).exists():
                 document.add_picture(path, width=Cm(16.0))
-                document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                picture = document.paragraphs[-1]
+                picture.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                # 차트 그림이 페이지 경계에서 잘리지 않도록 한 페이지에 붙여 둔다.
+                # (그림은 문단 하나에 통째로 들어가므로 keep_together로 충분하다)
+                picture.paragraph_format.keep_together = True
 
     def _flow_and_analysis(
         self,

@@ -24,6 +24,11 @@ NOISE_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 페이지를 본문으로 인정하는 최소 글자 수(정제 후 기준).
+MIN_PAGE_CHARS = 45
+# 같은 문서에서 이 횟수 이상 똑같이 반복되면 머리말·꼬리말로 본다.
+REPEAT_THRESHOLD = 3
+
 
 def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
@@ -68,8 +73,16 @@ def extract_readable_page_text(
     text = "\n".join(paragraphs)
     compact = clean_text(text)
 
-    # 수식·도형만 남은 페이지는 출처 목록에 노출하지 않는다.
-    if len(compact) < 120:
+    # 표지·간지처럼 실질 내용이 없는 페이지는 출처 목록에 노출하지 않는다.
+    #
+    # 2026-08-20: 기준을 120자에서 45자로 낮춤. 안전관리 매뉴얼처럼 그림 위주라
+    # 페이지당 글자 수가 적은 문서에서, 정작 인용하고 싶은 문단이 기준에 아슬아슬
+    # 미달해 통째로 버려지고 있었다(예: "대피훈련을 해보세요..." 100자,
+    # "소방시설 및 피난설비 - 경보설비/화재감지기/스프링클러..." 114자).
+    #
+    # 기준만 낮추면 반복되는 탐색 머리말이 대량 유입되므로, 아래 drop_repeated_pages가
+    # 문서 단위로 그것을 제거하는 것과 반드시 함께 동작해야 한다.
+    if len(compact) < MIN_PAGE_CHARS:
         return ""
 
     math_count = len(
@@ -79,6 +92,31 @@ def extract_readable_page_text(
         return ""
 
     return text
+
+
+def drop_repeated_pages(pages: list[str]) -> list[str]:
+    """한 문서 안에서 반복되는 머리말·꼬리말만 남은 페이지를 비운다.
+
+    본문이 이미지로 들어간 PDF는 페이지마다 탐색용 머리말
+    (예: "매뉴얼개요 기획·설계및준비 실시간모니터링및대응")만 텍스트로 남는다.
+    이런 페이지를 인덱스에 넣으면 같은 문장이 수십 개 쌓여 검색 결과를 오염시킨다.
+
+    정제 후 문자열이 같은 페이지가 REPEAT_THRESHOLD회 이상 나오면 머리말로 보고 버린다.
+    실제 본문이 여러 페이지에 걸쳐 완전히 동일한 경우는 사실상 없다.
+    """
+
+    normalized = [clean_text(p) for p in pages]
+    counts: dict[str, int] = {}
+    for value in normalized:
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+
+    return [
+        ""
+        if value and counts.get(value, 0) >= REPEAT_THRESHOLD
+        else page
+        for page, value in zip(pages, normalized)
+    ]
 
 
 def chunk_text(text: str, size: int = 900, overlap: int = 150) -> list[str]:
@@ -99,10 +137,13 @@ def extract_chunks() -> list[dict]:
     items: list[dict] = []
     for pdf_path in sorted(SOURCE_DIR.glob("*.pdf")):
         document = fitz.open(pdf_path)
-        for page_index, page in enumerate(document):
-            text = extract_readable_page_text(
-                page
-            )
+        # 머리말 판정은 문서 전체를 봐야 하므로 페이지를 먼저 모두 뽑아둔다.
+        pages = [
+            extract_readable_page_text(page)
+            for page in document
+        ]
+        pages = drop_repeated_pages(pages)
+        for page_index, text in enumerate(pages):
             for chunk_index, chunk in enumerate(chunk_text(text)):
                 items.append(
                     {
